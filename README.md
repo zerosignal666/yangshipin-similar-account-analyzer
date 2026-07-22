@@ -31,7 +31,7 @@ A desktop application that crawls public university account data from the Yangsh
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/yangshipin-similar-account-analyzer.git
+git clone https://github.com/zerosignal666/yangshipin-similar-account-analyzer.git
 cd yangshipin-similar-account-analyzer
 
 # Install dependencies
