@@ -1,98 +1,122 @@
-# Yangshipin Similar Account Analyzer
+[English](README_EN.md) | 中文
 
-A desktop application that crawls public university account data from the Yangshipin (央视频 / yspapp.cn) platform, with built-in data visualization and snapshot comparison.
+# 央视频同类账号分析器
 
-## Features
+一个爬取央视频（yspapp.cn）平台高校账号公开数据的桌面应用，内置数据可视化与快照对比功能。
 
-- **Batch Crawl** — Crawl follower count, play count, and video count from 100+ university accounts. Start / Pause / Resume / Stop with live progress.
-- **Data Table** — Sortable, searchable table with unit switching (raw / 万 / 亿). Highlight any university (e.g. your own) in red.
-- **Charts** — Interactive bar charts, histograms, and scatter plots with hover tooltips and scroll zoom.
-- **Dashboard** — Responsive multi-chart grid that adapts to window size.
-- **Snapshot System** — Each crawl saves a timestamped snapshot. Compare any two snapshots to see growth.
-- **Rate Limiting** — Configurable crawl frequency control to be respectful to the server.
+## 功能
 
-## Screenshots
+- **批量爬取** — 一键爬取 100+ 高校账号的粉丝数、播放量、视频数。支持开始/暂停/继续/停止，实时显示进度。
+- **数据表格** — 可排序、可搜索的数据表，支持单位切换（个/万/亿）。武汉科技大学默认红色加粗高亮，也可自定义高亮任意学校。
+- **交互图表** — 柱状图、直方图、散点图，鼠标悬停显示数值，滚轮缩放，点击标注。
+- **仪表盘** — 多图表网格布局，随窗口大小自适应列数。
+- **快照系统** — 每次爬取保存时间戳快照，可任选两次快照对比增长变化。
+- **频率控制** — 可配置爬取频率限制，避免频繁请求服务器。
 
-*Coming soon*
+## 截图
 
-## Requirements
+*待补充*
 
-- Windows 10/11 64-bit (macOS support planned)
-- No Python installation needed if using the pre-built EXE
+## 运行环境
 
-## Quick Start
+- Windows 10/11 64 位（macOS 计划支持）
+- 使用预编译 EXE 则无需安装 Python
 
-### Option 1: Run the Pre-built EXE
+## 快速开始
 
-1. Download `YSP-Analyzer.zip` from [Releases](../../releases)
-2. Extract and double-click `YSP-Analyzer.exe`
+### 方式一：下载 EXE 直接运行
 
-### Option 2: Run from Source
+1. 从 [Releases](../../releases) 页面下载 `YSP-Analyzer.zip`
+2. 解压后双击 `YSP-Analyzer.exe`
+
+### 方式二：从源码运行
 
 ```bash
-# Clone the repo
+# 克隆仓库
 git clone https://github.com/zerosignal666/yangshipin-similar-account-analyzer.git
 cd yangshipin-similar-account-analyzer
 
-# Install dependencies
+# 安装依赖
 pip install -r requirements.txt
 
-# Run
+# 运行
 python main.py
 ```
 
-## Project Structure
+## 项目结构
 
 ```
 ysp-analyzer/
-├── main.py                  # Entry point
-├── requirements.txt         # Python dependencies
-├── 同类账号.txt              # Account list (Name [TAB] URL)
+├── main.py                  # 程序入口
+├── requirements.txt         # Python 依赖
+├── 同类账号.txt              # 账号列表（校名 [TAB] URL）
 ├── src/
-│   ├── crawler/             # Web crawling
-│   │   ├── engine.py        # Crawl orchestration (thread pool, rate limit)
-│   │   ├── fetcher.py       # HTTP client (httpx)
-│   │   ├── parser.py        # HTML/JSON parser (extract __STATE_USER__)
-│   │   └── url_parser.py    # Account file parser + CPID extractor
+│   ├── crawler/             # 爬虫模块
+│   │   ├── engine.py        # 爬取编排（线程池 + 频率限制）
+│   │   ├── fetcher.py       # HTTP 客户端（httpx）
+│   │   ├── parser.py        # HTML/JSON 解析（提取 __STATE_USER__）
+│   │   └── url_parser.py    # 账号文件解析 + CPID 提取
 │   ├── models/
-│   │   ├── schema.py        # SQL table definitions + unit normalization
-│   │   └── database.py      # SQLite CRUD operations
+│   │   ├── schema.py        # 数据库表定义 + 单位归一化
+│   │   └── database.py      # SQLite 增删改查
 │   ├── analysis/
-│   │   ├── charts.py        # Matplotlib + seaborn chart functions
-│   │   └── stats.py         # Pandas statistics + PandaTools
+│   │   ├── charts.py        # Matplotlib + seaborn 图表
+│   │   └── stats.py         # Pandas 统计分析
 │   └── ui/
-│       ├── main_window.py   # Tkinter main window (3-tab layout)
-│       ├── chart_windows.py # Interactive chart popups (zoom, hover, click)
-│       └── workers.py       # Background thread for crawl operations
-└── data/                    # SQLite database (auto-created, gitignored)
+│       ├── main_window.py   # Tkinter 主界面（爬取/数据/分析三页签）
+│       ├── chart_windows.py # 交互式图表弹窗（缩放/悬停/点击）
+│       └── workers.py       # 后台爬取线程
+└── data/                    # SQLite 数据库（自动生成，已 gitignore）
 ```
 
-## Custom Account List
+## 自定义账号列表
 
-Edit `同类账号.txt` to add or remove accounts. Format:
+编辑 `同类账号.txt` 添加或删除账号，格式：
 
 ```
-University Name[TAB]https://www.yspapp.cn/...
+学校名称[TAB键]https://www.yspapp.cn/...
 ```
 
-One account per line. The app reads this file on startup.
+每行一个账号，保存后重新打开程序即可生效。
 
-## Tech Stack
+## 技术栈
 
-| Layer | Library |
+| 层级 | 使用库 |
 |---|---|
-| GUI | Tkinter (built-in) |
-| Charts | Matplotlib + Seaborn (TkAgg backend) |
-| Data | Pandas + NumPy |
-| HTTP | httpx |
-| Parser | BeautifulSoup4 + lxml |
-| Database | SQLite |
-| Packaging | PyInstaller |
+| 界面 | Tkinter（Python 内置） |
+| 图表 | Matplotlib + Seaborn（TkAgg 后端） |
+| 数据 | Pandas + NumPy |
+| 网络 | httpx |
+| 解析 | BeautifulSoup4 + lxml |
+| 数据库 | SQLite |
+| 打包 | PyInstaller |
 
-## Data Source
+## 数据来源
 
-All data comes from public profile pages on [yspapp.cn](https://www.yspapp.cn). The app parses the `window.__STATE_USER__` JSON embedded in the HTML source. No login or API key required.
+所有数据来自 [yspapp.cn](https://www.yspapp.cn) 公开的个人主页。程序解析页面 HTML 源码中的 `window.__STATE_USER__` JSON 数据。无需登录，无需 API Key。
 
-## License
+## 界面中英对照
 
-MIT License — see [LICENSE](LICENSE) for details.
+| 英文（界面） | 中文 |
+|---|---|
+| Crawl | 爬取数据 |
+| Data Table | 数据表格 |
+| Analysis | 数据分析 |
+| Start Crawl | 开始爬取 |
+| Pause / Resume | 暂停 / 继续 |
+| Stop | 停止 |
+| Reset Limit | 重置限制 |
+| Export CSV | 导出CSV |
+| Analyze | 分析 |
+| View | 查看 |
+| Open Dashboard | 综合仪表盘 |
+| Settings | 设置 |
+| Snapshot Manager | 快照管理 |
+| Single Snapshot | 单个快照分析 |
+| Compare Snapshots | 快照对比 |
+
+完整对照请参见 `使用说明.txt`。
+
+## 开源协议
+
+MIT License — 详见 [LICENSE](LICENSE) 文件。
