@@ -51,9 +51,14 @@ def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dic
     new = [{"cp_id": c, "name": df_b.loc[c, "name"]} for c in df_b.index.difference(df_a.index)]
     gone = [{"cp_id": c, "name": df_a.loc[c, "name"]} for c in df_a.index.difference(df_b.index)]
 
+    # 播放量增长 / 新发视频数 (视频增长>0时才有效)
+    cmp["play_per_video"] = np.where(cmp["video_chg"] > 0,
+                                     cmp["play_chg"] / cmp["video_chg"], np.nan)
+
     fans_growth = cmp.nlargest(20, "fans_chg")[["name", "fans_chg", "fans_rate"]].dropna(subset=["fans_chg"]).to_dict("records")
     play_growth = cmp.nlargest(20, "play_chg")[["name", "play_chg", "play_rate"]].dropna(subset=["play_chg"]).to_dict("records")
     video_growth = cmp.nlargest(20, "video_chg")[["name", "video_chg"]].dropna(subset=["video_chg"]).to_dict("records")
+    ppv_growth = cmp.nlargest(20, "play_per_video")[["name", "play_chg", "video_chg", "play_per_video"]].dropna(subset=["play_per_video"]).to_dict("records")
 
     summary = {
         f"fans_{name_a}": float(df_a["fans_base"].sum()) if not df_a.empty else 0,
@@ -68,4 +73,5 @@ def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dic
         "acct_chg": len(new) - len(gone),
     }
     return {"new": new, "gone": gone, "fans_growth": fans_growth,
-            "play_growth": play_growth, "video_growth": video_growth, "summary": summary}
+            "play_growth": play_growth, "video_growth": video_growth,
+            "ppv_growth": ppv_growth, "summary": summary, "all": cmp.to_dict("records")}

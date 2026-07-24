@@ -1,10 +1,9 @@
-"""图表 —— matplotlib + seaborn，Tkinter 嵌入，多平台中文字体"""
+"""图表 —— matplotlib，Tkinter 嵌入，多平台中文字体"""
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from matplotlib.font_manager import FontProperties
-import seaborn as sns
 import numpy as np
 import os, warnings, glob, urllib.request, shutil, sys
 warnings.filterwarnings("ignore", category=UserWarning, message=".*Glyph.*missing.*")
@@ -128,7 +127,10 @@ def _force_init_font():
 
 def setup_font():
     _force_init_font()
-    sns.set_style("whitegrid")
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')
+    except Exception:
+        plt.style.use('ggplot')  # matplotlib < 3.6 fallback
 
 
 def get_cjk_font():

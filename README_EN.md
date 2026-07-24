@@ -10,7 +10,8 @@ A desktop application that crawls public university account data from the Yangsh
 - **Data Table** — Sortable, searchable table with unit switching (raw / 万 / 亿). Highlight any university (e.g. your own) in red.
 - **Charts** — Interactive bar charts, histograms, and scatter plots with hover tooltips and scroll zoom.
 - **Dashboard** — Responsive multi-chart grid that adapts to window size.
-- **Snapshot System** — Each crawl saves a timestamped snapshot. Compare any two snapshots to see growth.
+- **Snapshot System** — Each crawl saves a timestamped snapshot. Compare any two snapshots to see growth. Auto-swaps snapshots by time to ensure correct comparison direction.
+- **Snapshot Compare** — 4 growth ranking charts (fans/plays/videos/play-per-video), plus search any school by name for detailed comparison metrics.
 - **Rate Limiting** — Configurable crawl frequency control to be respectful to the server.
 
 ## Screenshots
@@ -84,7 +85,7 @@ One account per line. The app reads this file on startup.
 | Layer | Library |
 |---|---|
 | GUI | Tkinter (built-in) |
-| Charts | Matplotlib + Seaborn (TkAgg backend) |
+| Charts | Matplotlib (TkAgg backend) |
 | Data | Pandas + NumPy |
 | HTTP | httpx |
 | Parser | BeautifulSoup4 + lxml |

@@ -16,7 +16,7 @@ from ..analysis.charts import bar_top_n, setup_font, get_cjk_font
 from .workers import CrawlThread
 
 CBG = "#f5f5f5"; CPRI = "#4472C4"; CRED = "#C00000"; CGRN = "#2E7D32"
-CWR = "#E67E22"; CWHT = "#ffffff"
+CWR = "#E67E22"; CWHT = "#ffffff"; CPUR = "#7B1FA2"
 
 # ═══════════════════════════════════════════════════════
 #  Crawl Tab
@@ -314,7 +314,7 @@ class AnalysisTab(ttk.Frame):
 
     # ── Compare ───────────────────────────────────
     def _build_compare(self, p):
-        p.columnconfigure(0, weight=1); p.rowconfigure(2, weight=1)
+        p.columnconfigure(0, weight=1); p.rowconfigure(4, weight=1)
         bar = ttk.Frame(p); bar.grid(row=0, column=0, sticky="ew", pady=(8,5), padx=8)
         ttk.Label(bar, text="A (base):").pack(side="left")
         self.cb_a = ttk.Combobox(bar, state="readonly", width=25)
@@ -325,10 +325,31 @@ class AnalysisTab(ttk.Frame):
         tk.Button(bar, text="Compare", bg=CRED, fg="white",
             font=("",10,"bold"), padx=16, command=self._run_compare).pack(side="left", padx=10)
 
-        self.txt_compare = tk.Text(p, height=8, font=("Consolas",10), state="disabled", wrap="word", bg="#fafafa")
-        self.txt_compare.grid(row=1, column=0, sticky="ew", padx=8, pady=(0,5))
+        # 搜索栏
+        sbar = ttk.Frame(p); sbar.grid(row=1, column=0, sticky="ew", pady=(2,5), padx=8)
+        ttk.Label(sbar, text="Search School:").pack(side="left")
+        self.sv_cmp_search = tk.StringVar()
+        ttk.Entry(sbar, textvariable=self.sv_cmp_search, width=20).pack(side="left", padx=5)
+        tk.Button(sbar, text="Search", padx=10, command=self._on_cmp_search).pack(side="left", padx=2)
+        tk.Button(sbar, text="Clear", padx=8, command=self._clear_cmp_search).pack(side="left")
+        # 搜索反馈标签
+        self._cmp_status = ttk.Label(sbar, text="", foreground="#888")
+        self._cmp_status.pack(side="left", padx=8)
 
-        self._cmp_chart = ttk.Frame(p); self._cmp_chart.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0,8))
+        # 搜索结果列表（最多5条，点击可查看详情）
+        self._cmp_result_lb = tk.Listbox(p, height=0, font=("",10),
+                                          selectmode="single", exportselection=False,
+                                          bg="#fffbe6", activestyle="none")
+        self._cmp_result_lb.grid(row=2, column=0, sticky="ew", padx=8)
+        self._cmp_result_lb.grid_remove()  # 初始隐藏
+        self._cmp_result_lb.bind("<<ListboxSelect>>", self._on_cmp_select)
+        self._cmp_last_result = None  # 缓存上次对比结果
+        self._cmp_matches = []
+
+        self.txt_compare = tk.Text(p, height=6, font=("Consolas",10), state="disabled", wrap="word", bg="#fafafa")
+        self.txt_compare.grid(row=3, column=0, sticky="ew", padx=8, pady=(0,5))
+
+        self._cmp_chart = ttk.Frame(p); self._cmp_chart.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0,8))
         self._cmp_canvas = tk.Canvas(self._cmp_chart, bg=CWHT)
         self._cmp_scroll = ttk.Scrollbar(self._cmp_chart, orient="vertical", command=self._cmp_canvas.yview)
         self._cmp_inner = ttk.Frame(self._cmp_canvas)
@@ -459,35 +480,155 @@ class AnalysisTab(ttk.Frame):
         snap_b, data_b = self._get_snap(self.cb_b)
         if not data_a or not data_b: return
         if snap_a["id"]==snap_b["id"]: messagebox.showwarning("Warning","Select two different snapshots"); return
+
+        # 自动判断时间顺序：A 必须是较早的快照
+        swapped = False
+        if snap_a.get("created_at") and snap_b.get("created_at"):
+            if snap_a["created_at"] > snap_b["created_at"]:
+                snap_a, snap_b = snap_b, snap_a
+                data_a, data_b = data_b, data_a
+                swapped = True
+
         na,nb = snap_a["name"],snap_b["name"]
         r = compare_snapshots(data_a, data_b, na, nb); s=r["summary"]
         hl = self.sv_hl.get().strip() or None
 
         self.txt_compare.config(state="normal"); self.txt_compare.delete("1.0","end")
+        swap_note = "*** Auto-swapped: A was newer than B, reversed for correct comparison ***\n" if swapped else ""
         self.txt_compare.insert("end",
-            f"Compare: [{na}] vs [{nb}]\n{'='*60}\n"
+            f"Compare: [{na}] vs [{nb}]\n{'='*60}\n{swap_note}"
             f"Fans:  {s[f'fans_{na}']:,.0f} -> {s[f'fans_{nb}']:,.0f}  (chg: {s['fans_chg']:+,.0f})\n"
             f"Plays: {s[f'play_{na}']:,.0f} -> {s[f'play_{nb}']:,.0f}  (chg: {s['play_chg']:+,.0f})\n"
             f"Videos:{s[f'video_{na}']:,} -> {s[f'video_{nb}']:,}  (chg: {s['video_chg']:+,})\n"
             f"Accts: {s['acct_chg']:+d}  (new: {len(r['new'])}, gone: {len(r['gone'])})")
         self.txt_compare.config(state="disabled")
 
-        self._clear(self._cmp_inner)
-        self._add_fig(bar_top_n(to_dataframe(data_b),"fans_base",15,f"Fans: {nb}",highlight_name=hl),self._cmp_inner)
-        self._add_fig(bar_top_n(to_dataframe(data_b),"play_base",15,f"Plays: {nb}",highlight_name=hl),self._cmp_inner)
+        # 缓存结果，供搜索使用
+        self._cmp_last_result = r
+        self._clear_cmp_search()
 
+        self._clear(self._cmp_inner)
+
+        # 1. 粉丝增长 TOP 10
         if r["fans_growth"]:
-            gd = sorted(r["fans_growth"][:10], key=lambda x: x["fans_chg"])
-            fig,ax=plt.subplots(figsize=(10,5))
-            setup_font(); cjk=get_cjk_font()
-            names=[d["name"] for d in gd]; vals=[d["fans_chg"] for d in gd]
-            colors=[CRED if v>=0 else CPRI for v in vals]
-            ax.barh(range(len(names)),vals,color=colors)
-            ax.set_yticks(range(len(names)))
-            ax.set_yticklabels(names,fontsize=9,fontproperties=cjk)
-            ax.set_title("Fans Growth TOP 10",fontsize=14,fontweight="bold",fontproperties=cjk)
-            ax.axvline(0,color="black",linewidth=0.5)
-            fig.tight_layout(); self._add_fig(fig,self._cmp_inner)
+            self._add_growth_chart(r["fans_growth"], "fans_chg", "Fans Growth TOP 10",
+                                    "粉丝增长", CPUR, hl)
+
+        # 2. 播放量增长 TOP 10
+        if r["play_growth"]:
+            self._add_growth_chart(r["play_growth"], "play_chg", "Plays Growth TOP 10",
+                                    "播放量增长", CGRN, hl)
+
+        # 3. 视频增长 TOP 10
+        if r["video_growth"]:
+            self._add_growth_chart(r["video_growth"], "video_chg", "Video Growth TOP 10",
+                                    "视频增长", CPRI, hl)
+
+        # 4. 播放增长/新发视频 TOP 10 (仅当 video_chg>0 时有效)
+        if r["ppv_growth"]:
+            self._add_growth_chart(r["ppv_growth"], "play_per_video", "Play/Video Ratio TOP 10",
+                                    "播放增长/新视频", CWR, hl, fmt=",.1f")
+
+    def _add_growth_chart(self, data, col, title, cn_label, color, hl, fmt=",.0f"):
+        """通用增长柱状图"""
+        gd = sorted(data[:10], key=lambda x: x[col] or 0)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        setup_font(); cjk = get_cjk_font()
+        names = [d["name"] for d in gd]
+        vals = [d[col] if d[col] is not None else 0 for d in gd]
+        colors = [color if v >= 0 else "#999999" for v in vals]
+        if hl:
+            colors = [CRED if n == hl else c for n, c in zip(names, colors)]
+        ax.barh(range(len(names)), vals, color=colors)
+        ax.set_yticks(range(len(names)))
+        ax.set_yticklabels(names, fontsize=9, fontproperties=cjk)
+        ax.set_title(title, fontsize=14, fontweight="bold", fontproperties=cjk)
+        ax.axvline(0, color="black", linewidth=0.5)
+        # 在柱子上显示数值
+        for i, v in enumerate(vals):
+            xpos = max(v, 0) + max(vals)*0.01 if v >= 0 else v - max(abs(vv) for vv in vals)*0.01
+            ha = "left" if v >= 0 else "right"
+            ax.text(xpos, i, f" {v:{fmt}}", va="center", ha=ha, fontsize=8,
+                    fontproperties=cjk)
+        fig.tight_layout(); self._add_fig(fig, self._cmp_inner)
+
+    def _on_cmp_search(self):
+        """搜索按钮：显示最多5个匹配高校"""
+        r = self._cmp_last_result
+        # 还没点 Compare
+        if not r:
+            self._cmp_status.config(text="Please click [Compare] first", foreground=CRED)
+            return
+        txt = self.sv_cmp_search.get().strip()
+        self._cmp_result_lb.delete(0, "end")
+        self._cmp_result_lb.grid_remove()
+        self._cmp_matches = []
+        if not txt:
+            self._cmp_status.config(text="")
+            return
+        # 模糊匹配，最多5条
+        matches = []
+        for d in r.get("all", []):
+            if txt.lower() in d.get("name", "").lower():
+                matches.append(d)
+                if len(matches) >= 5:
+                    break
+        if matches:
+            for d in matches:
+                self._cmp_result_lb.insert("end", d["name"])
+            self._cmp_result_lb.configure(height=len(matches))
+            self._cmp_result_lb.grid()  # 显示
+            self._cmp_matches = matches
+            self._cmp_status.config(text=f"{len(matches)} match(es) — click to view detail",
+                                    foreground=CGRN)
+        else:
+            self._cmp_status.config(text=f"No match for '{txt}'", foreground=CRED)
+
+    def _on_cmp_select(self, event):
+        """点击搜索结果：在摘要区显示该校详细对比"""
+        sel = self._cmp_result_lb.curselection()
+        if not sel or not self._cmp_matches:
+            return
+        d = self._cmp_matches[sel[0]]
+        # 高亮选中项
+        for i in range(self._cmp_result_lb.size()):
+            self._cmp_result_lb.itemconfig(i, bg="#fffbe6")
+        self._cmp_result_lb.itemconfig(sel[0], bg="#b3d9ff")
+
+        self.txt_compare.config(state="normal")
+        text = self.txt_compare.get("1.0", "end-1c")
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.startswith("*** Search:")]
+        text = "\n".join(lines)
+        fchg = d.get("fans_chg", 0) or 0
+        pchg = d.get("play_chg", 0) or 0
+        vchg = d.get("video_chg", 0) or 0
+        ppv = d.get("play_per_video", None)
+        ppv_str = f"{ppv:,.1f}" if ppv is not None and ppv == ppv else "N/A"
+        search_line = (f"*** Search: {d['name']} ***  "
+                      f"Fans chg: {fchg:+,.0f}  "
+                      f"Plays chg: {pchg:+,.0f}  "
+                      f"Videos chg: {vchg:+,.0f}  "
+                      f"Play/Video: {ppv_str}")
+        self.txt_compare.delete("1.0", "end")
+        self.txt_compare.insert("end", text + "\n" + search_line)
+        self.txt_compare.config(state="disabled")
+
+    def _clear_cmp_search(self):
+        """清除搜索"""
+        self.sv_cmp_search.set("")
+        self._cmp_result_lb.delete(0, "end")
+        self._cmp_result_lb.grid_remove()
+        self._cmp_matches = []
+        self._cmp_status.config(text="")
+        if self._cmp_last_result:
+            self.txt_compare.config(state="normal")
+            text = self.txt_compare.get("1.0", "end-1c")
+            lines = text.split("\n")
+            lines = [l for l in lines if not l.startswith("*** Search:")]
+            self.txt_compare.delete("1.0", "end")
+            self.txt_compare.insert("end", "\n".join(lines))
+            self.txt_compare.config(state="disabled")
 
 # ═══════════════════════════════════════════════════════
 #  Settings Dialog
