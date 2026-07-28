@@ -1,6 +1,7 @@
-"""统计分析 —— 单快照分析 + 双快照对比"""
+"""统计分析 —— 单快照分析 + 双快照对比 + 趋势回归"""
 import pandas as pd
 import numpy as np
+from datetime import datetime
 
 
 def to_dataframe(data: list[dict]) -> pd.DataFrame:
@@ -40,6 +41,11 @@ def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dic
 
     cmp = pd.DataFrame(index=df_b.index.union(df_a.index))
     cmp["name"] = df_b["name"].combine_first(df_a["name"])
+    # Preserve unit info for interval calculation
+    for src, label in [(df_a, name_a), (df_b, name_b)]:
+        for col in ["fans_unit", "play_unit"]:
+            if col in src.columns:
+                cmp[f"{col}_{label}"] = src[col]
     for col, label in [("fans_base", "fans"), ("play_base", "play"), ("video_cnt", "video")]:
         cmp[f"{label}_{name_a}"] = df_a[col]
         cmp[f"{label}_{name_b}"] = df_b[col]
@@ -75,3 +81,82 @@ def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dic
     return {"new": new, "gone": gone, "fans_growth": fans_growth,
             "play_growth": play_growth, "video_growth": video_growth,
             "ppv_growth": ppv_growth, "summary": summary, "all": cmp.to_dict("records")}
+
+
+# ── 量化误差与趋势分析 ──────────────────────────
+
+QUANTIZATION_HALF = {"万": 500, "亿": 5000, "个": 0, "": 0}
+
+
+def _quant_half(unit):
+    """给定显示单位，返回量化误差半宽（±值）"""
+    return QUANTIZATION_HALF.get(unit, 0)
+
+
+def change_interval(val_a, unit_a, val_b, unit_b):
+    """计算变化量的置信区间 [low, high]，考虑显示量化误差。
+
+    返回: (change, low, high, confidence)
+      confidence: "confirmed" | "uncertain"
+    """
+    chg = val_b - val_a
+    # 两个独立量化误差求和
+    margin = _quant_half(unit_a) + _quant_half(unit_b)
+    low = chg - margin
+    high = chg + margin
+    if low > 0 or high < 0:
+        confidence = "confirmed"
+    else:
+        confidence = "uncertain"
+    return chg, low, high, confidence
+
+
+def theil_sen_slope(timestamps, values):
+    """Theil-Sen 稳健回归：所有两点间斜率的中位数。
+
+    timestamps: float 或 datetime（按秒计的时间戳列表）
+    values: 粉丝数列表（base unit）
+    """
+    if len(timestamps) < 2:
+        return None, None, None
+    ts = np.asarray(timestamps, dtype=float)
+    vs = np.asarray(values, dtype=float)
+    n = len(ts)
+    slopes = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            if ts[j] != ts[i]:
+                slopes.append((vs[j] - vs[i]) / (ts[j] - ts[i]))
+    if not slopes:
+        return None, None, None
+    robust_slope = np.median(slopes)
+    # OLS slope for comparison
+    A = np.vstack([ts, np.ones(n)]).T
+    ols_slope, intercept = np.linalg.lstsq(A, vs, rcond=None)[0]
+    return robust_slope, ols_slope, intercept
+
+
+def detect_spikes(timestamps, values, robust_slope, intercept=None):
+    """检测偏离稳健趋势线的异常点（疑似病毒传播）。
+
+    返回: [(index, timestamp, value, deviation), ...]
+    按偏差绝对值降序排列。
+    """
+    if robust_slope is None:
+        return []
+    ts = np.asarray(timestamps, dtype=float)
+    vs = np.asarray(values, dtype=float)
+    if intercept is None:
+        intercept = np.median(vs) - robust_slope * np.median(ts)
+    # 预测值 (Theil-Sen 回归线)
+    predicted = robust_slope * ts + intercept
+    deviations = vs - predicted
+    sigma = np.std(deviations)
+    if sigma < 1e-9:
+        return []
+    spike_indices = np.where(np.abs(deviations) > 2 * sigma)[0]
+    spikes = []
+    for i in spike_indices:
+        spikes.append((int(i), float(ts[i]), float(vs[i]), float(deviations[i])))
+    spikes.sort(key=lambda x: abs(x[3]), reverse=True)
+    return spikes

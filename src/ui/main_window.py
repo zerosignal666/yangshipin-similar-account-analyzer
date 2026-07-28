@@ -11,12 +11,14 @@ from ..models.database import (init_db, get_all_snapshots, get_snapshot_data,
     get_last_crawl_time, reset_crawl_log)
 from ..models.schema import format_value, DISPLAY_UNITS, auto_unit
 from ..crawler.url_parser import parse_account_file
-from ..analysis.stats import to_dataframe, compute_stats, compare_snapshots
+from ..analysis.stats import (to_dataframe, compute_stats, compare_snapshots,
+    change_interval, theil_sen_slope, detect_spikes)
 from ..analysis.charts import bar_top_n, setup_font, get_cjk_font
 from .workers import CrawlThread
 
 CBG = "#f5f5f5"; CPRI = "#4472C4"; CRED = "#C00000"; CGRN = "#2E7D32"
 CWR = "#E67E22"; CWHT = "#ffffff"; CPUR = "#7B1FA2"
+CUNCERTAIN = "#A0A0A0"; CCONFIRMED = "#2E7D32"
 
 # ═══════════════════════════════════════════════════════
 #  Crawl Tab
@@ -325,26 +327,25 @@ class AnalysisTab(ttk.Frame):
         tk.Button(bar, text="Compare", bg=CRED, fg="white",
             font=("",10,"bold"), padx=16, command=self._run_compare).pack(side="left", padx=10)
 
-        # 搜索栏
+        # 搜索栏 —— 自动补全
         sbar = ttk.Frame(p); sbar.grid(row=1, column=0, sticky="ew", pady=(2,5), padx=8)
         ttk.Label(sbar, text="Search School:").pack(side="left")
         self.sv_cmp_search = tk.StringVar()
-        ttk.Entry(sbar, textvariable=self.sv_cmp_search, width=20).pack(side="left", padx=5)
-        tk.Button(sbar, text="Search", padx=10, command=self._on_cmp_search).pack(side="left", padx=2)
+        self.sv_cmp_search.trace_add("write", lambda *a: self._on_cmp_search())
+        self._cmp_entry = ttk.Entry(sbar, textvariable=self.sv_cmp_search, width=20)
+        self._cmp_entry.pack(side="left", padx=5)
         tk.Button(sbar, text="Clear", padx=8, command=self._clear_cmp_search).pack(side="left")
-        # 搜索反馈标签
-        self._cmp_status = ttk.Label(sbar, text="", foreground="#888")
-        self._cmp_status.pack(side="left", padx=8)
 
-        # 搜索结果列表（最多5条，点击可查看详情）
-        self._cmp_result_lb = tk.Listbox(p, height=0, font=("",10),
+        # 搜索结果列表（最多5条，单击看详情，双击填输入框）
+        self._cmp_result_lb = tk.Listbox(p, height=0, font=("", 10),
                                           selectmode="single", exportselection=False,
                                           bg="#fffbe6", activestyle="none")
         self._cmp_result_lb.grid(row=2, column=0, sticky="ew", padx=8)
-        self._cmp_result_lb.grid_remove()  # 初始隐藏
         self._cmp_result_lb.bind("<<ListboxSelect>>", self._on_cmp_select)
-        self._cmp_last_result = None  # 缓存上次对比结果
+        self._cmp_result_lb.bind("<Double-Button-1>", self._on_cmp_dblclick)
+        self._cmp_last_result = None
         self._cmp_matches = []
+        self._p = p  # 保存父容器引用供趋势搜索使用
 
         self.txt_compare = tk.Text(p, height=6, font=("Consolas",10), state="disabled", wrap="word", bg="#fafafa")
         self.txt_compare.grid(row=3, column=0, sticky="ew", padx=8, pady=(0,5))
@@ -493,10 +494,23 @@ class AnalysisTab(ttk.Frame):
         r = compare_snapshots(data_a, data_b, na, nb); s=r["summary"]
         hl = self.sv_hl.get().strip() or None
 
+        # 计算时间跨度
+        time_span_days = 0
+        if snap_a.get("created_at") and snap_b.get("created_at"):
+            try:
+                ta = datetime.fromisoformat(snap_a["created_at"])
+                tb = datetime.fromisoformat(snap_b["created_at"])
+                time_span_days = (tb - ta).days
+            except Exception:
+                pass
+
         self.txt_compare.config(state="normal"); self.txt_compare.delete("1.0","end")
         swap_note = "*** Auto-swapped: A was newer than B, reversed for correct comparison ***\n" if swapped else ""
+        precision_note = ("*** Precision: ±500 per measurement (万-unit). "
+                         "Bars in lighter shade = change within rounding error.\n")
         self.txt_compare.insert("end",
-            f"Compare: [{na}] vs [{nb}]\n{'='*60}\n{swap_note}"
+            f"Compare: [{na}] vs [{nb}]  |  Time span: {time_span_days} days\n{'='*60}\n"
+            f"{swap_note}{precision_note}"
             f"Fans:  {s[f'fans_{na}']:,.0f} -> {s[f'fans_{nb}']:,.0f}  (chg: {s['fans_chg']:+,.0f})\n"
             f"Plays: {s[f'play_{na}']:,.0f} -> {s[f'play_{nb}']:,.0f}  (chg: {s['play_chg']:+,.0f})\n"
             f"Videos:{s[f'video_{na}']:,} -> {s[f'video_{nb}']:,}  (chg: {s['video_chg']:+,})\n"
@@ -505,32 +519,41 @@ class AnalysisTab(ttk.Frame):
 
         # 缓存结果，供搜索使用
         self._cmp_last_result = r
+        self._cmp_last_snap_a = snap_a
+        self._cmp_last_snap_b = snap_b
+        self._cmp_last_hl = hl
         self._clear_cmp_search()
 
         self._clear(self._cmp_inner)
 
+        # 储存 all 数据供趋势分析使用
+        self._cmp_all = r.get("all", [])
+
         # 1. 粉丝增长 TOP 10
         if r["fans_growth"]:
             self._add_growth_chart(r["fans_growth"], "fans_chg", "Fans Growth TOP 10",
-                                    "粉丝增长", CPUR, hl)
+                                    CPUR, hl, time_span_days)
 
         # 2. 播放量增长 TOP 10
         if r["play_growth"]:
             self._add_growth_chart(r["play_growth"], "play_chg", "Plays Growth TOP 10",
-                                    "播放量增长", CGRN, hl)
+                                    CGRN, hl, time_span_days)
 
         # 3. 视频增长 TOP 10
         if r["video_growth"]:
             self._add_growth_chart(r["video_growth"], "video_chg", "Video Growth TOP 10",
-                                    "视频增长", CPRI, hl)
+                                    CPRI, hl, time_span_days)
 
         # 4. 播放增长/新发视频 TOP 10 (仅当 video_chg>0 时有效)
         if r["ppv_growth"]:
             self._add_growth_chart(r["ppv_growth"], "play_per_video", "Play/Video Ratio TOP 10",
-                                    "播放增长/新视频", CWR, hl, fmt=",.1f")
+                                    CWR, hl, time_span_days, fmt=",.1f")
 
-    def _add_growth_chart(self, data, col, title, cn_label, color, hl, fmt=",.0f"):
-        """通用增长柱状图"""
+        # 趋势分析按钮（始终显示）
+        self._add_trend_button(time_span_days)
+
+    def _add_growth_chart(self, data, col, title, color, hl, time_span=0, fmt=",.0f"):
+        """通用增长柱状图。time_span 预留，当前仅用于颜色区分。"""
         gd = sorted(data[:10], key=lambda x: x[col] or 0)
         fig, ax = plt.subplots(figsize=(10, 5))
         setup_font(); cjk = get_cjk_font()
@@ -552,40 +575,156 @@ class AnalysisTab(ttk.Frame):
                     fontproperties=cjk)
         fig.tight_layout(); self._add_fig(fig, self._cmp_inner)
 
-    def _on_cmp_search(self):
-        """搜索按钮：显示最多5个匹配高校"""
+    def _add_trend_button(self, time_span_days):
+        """图表底部：趋势分析搜索栏 + 自动补全"""
+        frm = ttk.Frame(self._cmp_inner)
+        frm.pack(fill="x", pady=10)
+        ttk.Label(frm, text="Trend School:").pack(side="left")
+        self.sv_trend_school = tk.StringVar(value=self._cmp_last_hl or "")
+        self.sv_trend_school.trace_add("write", lambda *a: self._on_trend_filter())
+        self._trend_entry = ttk.Entry(frm, textvariable=self.sv_trend_school, width=18)
+        self._trend_entry.pack(side="left", padx=5)
+        warn = "" if time_span_days >= 30 else f" (only {time_span_days}d)"
+        tk.Button(frm, text=f"Open Trend{warn}",
+                  bg=CPUR, fg="white", font=("", 10), padx=14, pady=4,
+                  command=self._open_trend).pack(side="left", padx=5)
+
+        # 趋势搜索自动补全列表
+        self._trend_lb = tk.Listbox(self._cmp_inner, height=0, font=("", 10),
+                                     selectmode="single", exportselection=False,
+                                     bg="#fffbe6", activestyle="none")
+        self._trend_lb.pack(fill="x", pady=(0, 4))
+        self._trend_lb.bind("<Double-Button-1>", self._on_trend_dblclick)
+        self._trend_matches = []
+
+    def _on_trend_filter(self):
+        """趋势搜索自动补全"""
+        self._trend_lb.delete(0, "end")
+        self._trend_matches = []
+        # 从对比结果中获取所有校名
         r = self._cmp_last_result
-        # 还没点 Compare
         if not r:
-            self._cmp_status.config(text="Please click [Compare] first", foreground=CRED)
+            self._trend_lb.configure(height=0)
             return
-        txt = self.sv_cmp_search.get().strip()
-        self._cmp_result_lb.delete(0, "end")
-        self._cmp_result_lb.grid_remove()
-        self._cmp_matches = []
+        txt = self.sv_trend_school.get().strip()
         if not txt:
-            self._cmp_status.config(text="")
+            self._trend_lb.configure(height=0)
             return
-        # 模糊匹配，最多5条
-        matches = []
         for d in r.get("all", []):
             if txt.lower() in d.get("name", "").lower():
-                matches.append(d)
-                if len(matches) >= 5:
+                self._trend_matches.append(d)
+                if len(self._trend_matches) >= 5:
                     break
-        if matches:
-            for d in matches:
-                self._cmp_result_lb.insert("end", d["name"])
-            self._cmp_result_lb.configure(height=len(matches))
-            self._cmp_result_lb.grid()  # 显示
-            self._cmp_matches = matches
-            self._cmp_status.config(text=f"{len(matches)} match(es) — click to view detail",
-                                    foreground=CGRN)
+        if self._trend_matches:
+            for d in self._trend_matches:
+                self._trend_lb.insert("end", d["name"])
+            self._trend_lb.configure(height=len(self._trend_matches))
         else:
-            self._cmp_status.config(text=f"No match for '{txt}'", foreground=CRED)
+            self._trend_lb.configure(height=0)
+
+    def _on_trend_dblclick(self, event):
+        """双击趋势补全列表：填入输入框"""
+        sel = self._trend_lb.curselection()
+        if not sel or not self._trend_matches:
+            return
+        name = self._trend_matches[sel[0]]["name"]
+        self.sv_trend_school.set(name)
+        self._trend_lb.configure(height=0)
+        self._trend_matches = []
+
+    def _open_trend(self):
+        """打开趋势分析窗口：从搜索框获取高校名，拉所有快照数据做 Theil-Sen 回归"""
+        target_name = self.sv_trend_school.get().strip()
+        if not target_name:
+            messagebox.showinfo("Trend Analysis", "Enter a school name above.")
+            return
+
+        # 从所有快照获取该高校的时间序列数据
+        from ..models.database import get_all_snapshots, get_snapshot_data
+        all_snaps = get_all_snapshots()
+        if len(all_snaps) < 2:
+            messagebox.showwarning("Trend Analysis", "Need at least 2 snapshots for trend analysis.")
+            return
+
+        timestamps = []
+        fans_vals = []
+        snap_labels = []
+        for snap in sorted(all_snaps, key=lambda s: s["created_at"]):
+            data = get_snapshot_data(snap["id"])
+            for d in data:
+                if d["name"] == target_name:
+                    try:
+                        ts = datetime.fromisoformat(snap["created_at"]).timestamp()
+                    except Exception:
+                        ts = 0
+                    timestamps.append(ts)
+                    fans_vals.append(d["fans_base"] or 0)
+                    snap_labels.append(snap["name"])
+                    break
+
+        if len(timestamps) < 2:
+            messagebox.showwarning("Trend Analysis",
+                f"'{target_name}' only appears in {len(timestamps)} snapshot(s). Need 2+.")
+            return
+
+        # 计算时间跨度
+        td = (max(timestamps) - min(timestamps)) / 86400.0  # seconds -> days
+
+        # 时间跨度太短时警告
+        if td < 30:
+            ok = messagebox.askyesno("Trend Analysis",
+                f"Only {td:.0f} days of data ({len(timestamps)} snapshots).\n"
+                f"Short time spans make trend estimates unreliable (±500 quantization error dominates).\n\n"
+                f"Continue anyway?")
+            if not ok:
+                return
+
+        robust_slope, ols_slope, intercept = theil_sen_slope(timestamps, fans_vals)
+        spikes = detect_spikes(timestamps, fans_vals, robust_slope, intercept)
+
+        from .chart_windows import TrendWindow
+        TrendWindow(self, target_name, timestamps, fans_vals, snap_labels,
+                    robust_slope, ols_slope, intercept, spikes, td)
+
+    def _on_cmp_search(self):
+        """自动补全：每次输入触发，更新下拉列表"""
+        r = self._cmp_last_result
+        self._cmp_result_lb.delete(0, "end")
+        self._cmp_matches = []
+        if not r:
+            self._cmp_result_lb.configure(height=0)
+            return
+        txt = self.sv_cmp_search.get().strip()
+        if not txt:
+            self._cmp_result_lb.configure(height=0)
+            return
+        # 模糊匹配，最多5条
+        for d in r.get("all", []):
+            if txt.lower() in d.get("name", "").lower():
+                self._cmp_matches.append(d)
+                if len(self._cmp_matches) >= 5:
+                    break
+        if self._cmp_matches:
+            for d in self._cmp_matches:
+                self._cmp_result_lb.insert("end", d["name"])
+            self._cmp_result_lb.configure(height=len(self._cmp_matches))
+        else:
+            self._cmp_result_lb.configure(height=0)
+        # 更新趋势搜索的候选列表
+        self._on_trend_filter()
+
+    def _on_cmp_dblclick(self, event):
+        """双击列表项：填入输入框"""
+        sel = self._cmp_result_lb.curselection()
+        if not sel or not self._cmp_matches:
+            return
+        name = self._cmp_matches[sel[0]]["name"]
+        self.sv_cmp_search.set(name)
+        self._cmp_result_lb.configure(height=0)
+        self._cmp_matches = []
 
     def _on_cmp_select(self, event):
-        """点击搜索结果：在摘要区显示该校详细对比"""
+        """点击搜索结果：在摘要区显示该校详细对比（含误差区间）"""
         sel = self._cmp_result_lb.curselection()
         if not sel or not self._cmp_matches:
             return
@@ -600,16 +739,31 @@ class AnalysisTab(ttk.Frame):
         lines = text.split("\n")
         lines = [l for l in lines if not l.startswith("*** Search:")]
         text = "\n".join(lines)
+
+        # 获取单位信息用于区间计算
+        ua_fans = d.get(f"fans_unit_A", d.get("fans_unit", "个"))
+        ub_fans = d.get(f"fans_unit_B", d.get("fans_unit", "个"))
+        ua_play = d.get(f"play_unit_A", d.get("play_unit", "个"))
+        ub_play = d.get(f"play_unit_B", d.get("play_unit", "个"))
+
         fchg = d.get("fans_chg", 0) or 0
         pchg = d.get("play_chg", 0) or 0
         vchg = d.get("video_chg", 0) or 0
         ppv = d.get("play_per_video", None)
         ppv_str = f"{ppv:,.1f}" if ppv is not None and ppv == ppv else "N/A"
-        search_line = (f"*** Search: {d['name']} ***  "
-                      f"Fans chg: {fchg:+,.0f}  "
-                      f"Plays chg: {pchg:+,.0f}  "
-                      f"Videos chg: {vchg:+,.0f}  "
-                      f"Play/Video: {ppv_str}")
+
+        # 计算粉丝和播放量变化区间
+        _, flo, fhi, fconf = change_interval(
+            d.get("fans_A", 0), ua_fans, d.get("fans_B", 0), ub_fans)
+        _, plo, phi, pconf = change_interval(
+            d.get("play_A", 0), ua_play, d.get("play_B", 0), ub_play)
+        fflag = " [confirmed]" if fconf == "confirmed" else " [uncertain ±500]"
+        pflag = " [confirmed]" if pconf == "confirmed" else " [uncertain ±500]"
+
+        search_line = (f"*** Search: {d['name']} ***\n"
+                      f"  Fans chg: {fchg:+,.0f}  ({flo:+,.0f} ~ {fhi:+,.0f}){fflag}\n"
+                      f"  Plays chg: {pchg:+,.0f}  ({plo:+,.0f} ~ {phi:+,.0f}){pflag}\n"
+                      f"  Videos chg: {vchg:+,.0f}  |  Play/Video: {ppv_str}")
         self.txt_compare.delete("1.0", "end")
         self.txt_compare.insert("end", text + "\n" + search_line)
         self.txt_compare.config(state="disabled")
@@ -618,9 +772,8 @@ class AnalysisTab(ttk.Frame):
         """清除搜索"""
         self.sv_cmp_search.set("")
         self._cmp_result_lb.delete(0, "end")
-        self._cmp_result_lb.grid_remove()
+        self._cmp_result_lb.configure(height=0)
         self._cmp_matches = []
-        self._cmp_status.config(text="")
         if self._cmp_last_result:
             self.txt_compare.config(state="normal")
             text = self.txt_compare.get("1.0", "end-1c")

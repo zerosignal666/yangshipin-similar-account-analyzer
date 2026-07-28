@@ -246,6 +246,114 @@ class ScatterWindow(_Base):
         self._canvas.draw_idle()
 
 
+class TrendWindow(_Base):
+    """趋势分析窗口：Theil-Sen 稳健回归 + OLS 对比 + 异常点标注"""
+    def __init__(self, parent, school_name, timestamps, values, labels,
+                 robust_slope, ols_slope, intercept, spikes, time_span_days):
+        self._sname = school_name
+        self._ts = timestamps; self._vs = values; self._ls = labels
+        self._rs = robust_slope; self._os = ols_slope; self._ic = intercept
+        self._spikes = spikes; self._td = time_span_days
+        super().__init__(parent, f"Trend: {school_name}")
+
+    def _build(self):
+        setup_font()
+        ax = self._fig.add_subplot(111)
+
+        # 原始数据散点
+        ax.scatter(self._ts, self._vs, s=80, c="#4472C4", zorder=5,
+                   edgecolors="white", linewidth=0.8)
+        # 数据点标签
+        for i, lbl in enumerate(self._ls):
+            akw = dict(fontsize=7, xytext=(0, -12), textcoords="offset points",
+                       ha="center", alpha=0.7)
+            if self._font_prop: akw["fontproperties"] = self._font_prop
+            ax.annotate(lbl, (self._ts[i], self._vs[i]), **akw)
+
+        t_min, t_max = min(self._ts), max(self._ts)
+        x_line = np.array([t_min, t_max])
+        ts_arr = np.array(self._ts)
+        vs_arr = np.array(self._vs)
+
+        # Theil-Sen 稳健线
+        if self._rs is not None:
+            intercept_rs = np.median(vs_arr) - self._rs * np.median(ts_arr)
+            y_line_rs = intercept_rs + self._rs * x_line
+            ax.plot(x_line, y_line_rs, "-", color="#C00000", linewidth=2.5,
+                    label=f"Theil-Sen (robust): {self._rs*86400:+.1f}/day", zorder=3)
+
+        # OLS 线（虚线对比）
+        if self._os is not None:
+            y_line_ols = np.median(vs_arr) - self._os * np.median(ts_arr) + self._os * x_line
+            ax.plot(x_line, y_line_ols, "--", color="#E67E22", linewidth=1.8,
+                    label=f"OLS (nominal): {self._os*86400:+.1f}/day", zorder=3)
+
+        # 异常点标注
+        if self._spikes:
+            spike_indices = [s[0] for s in self._spikes[:5]]
+            spike_ts = [self._ts[i] for i in spike_indices]
+            spike_vs = [self._vs[i] for i in spike_indices]
+            ax.scatter(spike_ts, spike_vs, s=180, marker="D", c="#FF6B00",
+                       edgecolors="#C00000", linewidth=1.5, zorder=6,
+                       label=f"Spikes ({len(self._spikes)})")
+
+        # 标签
+        title_str = (f"Trend: {self._sname}  ({self._td:.0f} days, "
+                     f"{len(self._ts)} snapshots)")
+        if self._font_prop:
+            ax.set_title(title_str, fontsize=14, fontweight="bold",
+                         fontproperties=self._font_prop)
+            ax.set_ylabel("Fans (base unit)", fontproperties=self._font_prop)
+        else:
+            ax.set_title(title_str, fontsize=14, fontweight="bold")
+            ax.set_ylabel("Fans (base unit)")
+
+        # X 轴用日期标签
+        from datetime import datetime
+        date_labels = [datetime.fromtimestamp(t).strftime("%m/%d") for t in self._ts]
+        ax.set_xticks(self._ts)
+        if self._font_prop:
+            ax.set_xticklabels(date_labels, fontsize=8, rotation=30, ha="right",
+                               fontproperties=self._font_prop)
+        else:
+            ax.set_xticklabels(date_labels, fontsize=8, rotation=30, ha="right")
+
+        ax.legend(fontsize=9)
+        self._fig.tight_layout()
+        self._fig.canvas.mpl_connect("motion_notify_event", self._on_hover)
+
+        # 悬停标注
+        ann_kw = dict(xy=(0, 0), fontsize=10, fontweight="bold",
+                      bbox=dict(boxstyle="round,pad=0.4", fc="yellow", alpha=0.95),
+                      visible=False)
+        if self._font_name: ann_kw["fontfamily"] = self._font_name
+        if self._font_prop: ann_kw["fontproperties"] = self._font_prop
+        self._annot = ax.annotate("", **ann_kw)
+
+    def _on_hover(self, event):
+        if event.inaxes is None or event.xdata is None:
+            self._annot.set_visible(False); self._canvas.draw_idle(); return
+        # 搜索最近数据点
+        best, best_d = None, 1e9
+        xr = max(self._ts) - min(self._ts) or 1
+        yr = max(self._vs) - min(self._vs) or 1
+        for i in range(len(self._ts)):
+            d = ((self._ts[i] - event.xdata) / xr) ** 2 + ((self._vs[i] - event.ydata) / yr) ** 2
+            if d < best_d: best_d = d; best = i
+        if best is not None and best_d < 0.01:
+            from datetime import datetime
+            dt_str = datetime.fromtimestamp(self._ts[best]).strftime("%Y-%m-%d")
+            xl = event.inaxes.get_xlim(); yl = event.inaxes.get_ylim()
+            self._annot.xy = (event.xdata + (xl[1]-xl[0])*0.03,
+                              event.ydata + (yl[1]-yl[0])*0.03)
+            self._annot.set_text(f"{self._ls[best]}\n{dt_str}\n{self._vs[best]:,.0f}")
+            self._annot.set_visible(True)
+            self._canvas.draw_idle()
+        else:
+            self._annot.set_visible(False)
+            self._canvas.draw_idle()
+
+
 class DashboardWindow(tk.Toplevel):
     def __init__(self, parent, df, charts_config, highlight_name=None):
         super().__init__(parent)

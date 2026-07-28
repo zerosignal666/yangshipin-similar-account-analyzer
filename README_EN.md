@@ -11,7 +11,8 @@ A desktop application that crawls public university account data from the Yangsh
 - **Charts** — Interactive bar charts, histograms, and scatter plots with hover tooltips and scroll zoom.
 - **Dashboard** — Responsive multi-chart grid that adapts to window size.
 - **Snapshot System** — Each crawl saves a timestamped snapshot. Compare any two snapshots to see growth. Auto-swaps snapshots by time to ensure correct comparison direction.
-- **Snapshot Compare** — 4 growth ranking charts (fans/plays/videos/play-per-video), plus search any school by name for detailed comparison metrics.
+- **Snapshot Compare** — 4 growth ranking charts with quantization error intervals (confirmed / uncertain ±500). Autocomplete search: click to view detail, double-click to fill.
+- **Trend Analysis** — Theil-Sen robust regression eliminates outlier influence. OLS comparison shows nominal trend vs robust trend. Auto-detects likely viral spikes.
 - **Rate Limiting** — Configurable crawl frequency control to be respectful to the server.
 
 ## Screenshots
@@ -61,11 +62,11 @@ ysp-analyzer/
 │   │   ├── schema.py        # SQL table definitions + unit normalization
 │   │   └── database.py      # SQLite CRUD operations
 │   ├── analysis/
-│   │   ├── charts.py        # Matplotlib + seaborn chart functions
-│   │   └── stats.py         # Pandas statistics + PandaTools
+│   │   ├── charts.py        # Matplotlib chart functions + CJK fonts
+│   │   └── stats.py         # Statistics + Theil-Sen regression + intervals
 │   └── ui/
 │       ├── main_window.py   # Tkinter main window (3-tab layout)
-│       ├── chart_windows.py # Interactive chart popups (zoom, hover, click)
+│       ├── chart_windows.py # Interactive charts + Trend analysis window
 │       └── workers.py       # Background thread for crawl operations
 └── data/                    # SQLite database (auto-created, gitignored)
 ```

@@ -11,7 +11,8 @@
 - **交互图表** — 柱状图、直方图、散点图，鼠标悬停显示数值，滚轮缩放，点击标注。
 - **仪表盘** — 多图表网格布局，随窗口大小自适应列数。
 - **快照系统** — 每次爬取保存时间戳快照，可任选两次快照对比增长变化。自动判断时间顺序，避免反向对比。
-- **快照对比增强** — 4 个增长排行图表（粉丝增长/播放量增长/视频增长/播放量÷新视频），支持按校名搜索指定高校的详细对比数据。
+- **对比增强** — 4 个增长排行图表，含量化误差区间（confirmed / uncertain ±500）。支持自动补全搜索，单击查看详情，双击填入输入框。
+- **趋势分析** — Theil-Sen 稳健回归消除极端值干扰，对比 OLS 名义趋势，自动标注疑似病毒传播点。
 - **频率控制** — 可配置爬取频率限制，避免频繁请求服务器。
 
 ## 截图
@@ -61,11 +62,11 @@ ysp-analyzer/
 │   │   ├── schema.py        # 数据库表定义 + 单位归一化
 │   │   └── database.py      # SQLite 增删改查
 │   ├── analysis/
-│   │   ├── charts.py        # Matplotlib + seaborn 图表
-│   │   └── stats.py         # Pandas 统计分析
+│   │   ├── charts.py        # Matplotlib 图表生成 + 中文字体
+│   │   └── stats.py         # 统计分析 + Theil-Sen回归 + 变化量区间
 │   └── ui/
 │       ├── main_window.py   # Tkinter 主界面（爬取/数据/分析三页签）
-│       ├── chart_windows.py # 交互式图表弹窗（缩放/悬停/点击）
+│       ├── chart_windows.py # 交互图表弹窗 + 趋势分析窗口
 │       └── workers.py       # 后台爬取线程
 └── data/                    # SQLite 数据库（自动生成，已 gitignore）
 ```
@@ -121,6 +122,10 @@ ysp-analyzer/
 | Snapshot Manager | 快照管理 |
 | Single Snapshot | 单个快照分析 |
 | Compare Snapshots | 快照对比 |
+| Trend Analysis | 趋势分析（Theil-Sen 回归） |
+| Open Trend | 打开趋势 |
+| Search School | 搜索学校（自动补全） |
+| confirmed / uncertain | 确认增长 / 不确定（舍入误差内） |
 
 完整对照请参见 `使用说明.txt`。
 
