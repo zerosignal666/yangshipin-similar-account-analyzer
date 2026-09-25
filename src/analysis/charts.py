@@ -1,6 +1,6 @@
-"""图表 —— matplotlib，Tkinter 嵌入，多平台中文字体"""
+"""图表 —— matplotlib，Qt 嵌入，多平台中文字体。"""
 import matplotlib
-matplotlib.use("TkAgg")
+matplotlib.use("QtAgg")
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from matplotlib.font_manager import FontProperties

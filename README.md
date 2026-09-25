@@ -2,26 +2,24 @@
 
 # 央视频同类账号分析器
 
-一个爬取央视频（yspapp.cn）平台高校账号公开数据的桌面应用，内置数据可视化与快照对比功能。
+一个爬取央视频（yspapp.cn）平台高校账号公开数据的现代桌面应用，内置数据可视化、快照对比与全高校爆款监测。界面采用 PySide6，默认浅色并支持深色切换。
 
 ## 功能
 
 - **批量爬取** — 一键爬取 100+ 高校账号的粉丝数、播放量、视频数。支持开始/暂停/继续/停止，实时显示进度。
 - **数据表格** — 可排序、可搜索的数据表，支持单位切换（个/万/亿）。武汉科技大学默认红色加粗高亮，也可自定义高亮任意学校。
-- **交互图表** — 柱状图、直方图、散点图，鼠标悬停显示数值，滚轮缩放，点击标注。
+- **交互图表** — 排名与对比柱图采用紧凑刻度、悬停高亮和精确值浮层；直方图、散点图支持滚轮缩放与点击标注。
 - **仪表盘** — 多图表网格布局，随窗口大小自适应列数。
 - **快照系统** — 每次爬取保存时间戳快照，可任选两次快照对比增长变化。自动判断时间顺序，避免反向对比。
 - **对比增强** — 4 个增长排行图表，含量化误差区间（confirmed / uncertain ±500）。支持自动补全搜索，单击查看详情，双击填入输入框。
-- **趋势分析** — Theil-Sen 稳健回归消除极端值干扰，对比 OLS 名义趋势，自动标注疑似病毒传播点。
+- **全高校爆款监测** — 选择快照区间后同时扫描账号列表中的全部高校，按播放增长、视频增长、单条新增视频效率和稳健异常信号排名；“筛选门槛”提供通俗原理说明和固定倍数单位，缺失快照区间不参与判定，并可双击下钻单校明细。
 - **频率控制** — 可配置爬取频率限制，避免频繁请求服务器。
-
-## 截图
-
-*待补充*
+- **易用设置** — 采集参数使用大号减/加按钮、纯数字输入区与固定单位，减少误输并便于连续调整。
 
 ## 运行环境
 
-- Windows 10/11 64 位（macOS 计划支持）
+- Windows 10/11 64 位
+- macOS 代码层已兼容，正式安装包仍待在真实 Mac 上验证
 - 使用预编译 EXE 则无需安装 Python
 
 ## 快速开始
@@ -63,11 +61,16 @@ ysp-analyzer/
 │   │   └── database.py      # SQLite 增删改查
 │   ├── analysis/
 │   │   ├── charts.py        # Matplotlib 图表生成 + 中文字体
-│   │   └── stats.py         # 统计分析 + Theil-Sen回归 + 变化量区间
+│   │   ├── stats.py         # 统计分析 + 变化量区间
+│   │   └── burst.py         # 学校爆款区间与稳健阈值
 │   └── ui/
-│       ├── main_window.py   # Tkinter 主界面（爬取/数据/分析三页签）
-│       ├── chart_windows.py # 交互图表弹窗 + 趋势分析窗口
-│       └── workers.py       # 后台爬取线程
+│       ├── main_window.py   # PySide6 主界面（六个侧栏工作区）
+│       ├── burst_page.py    # 全高校爆款监测、排名与筛选
+│       ├── theme.py         # 浅色/深色主题与跨平台字体
+│       ├── widgets.py       # 通用卡片、标题与指标组件
+│       ├── chart_windows.py # QtAgg 通用交互图表
+│       ├── burst_window.py  # 单校爆款证据详情窗口
+│       └── workers.py       # QThread 后台爬取线程
 └── data/                    # SQLite 数据库（自动生成，已 gitignore）
 ```
 
@@ -85,8 +88,8 @@ ysp-analyzer/
 
 | 层级 | 使用库 |
 |---|---|
-| 界面 | Tkinter（Python 内置） |
-| 图表 | Matplotlib（TkAgg 后端） |
+| 界面 | PySide6（Qt 6） |
+| 图表 | Matplotlib（QtAgg 后端） |
 | 数据 | Pandas + NumPy |
 | 网络 | httpx |
 | 解析 | BeautifulSoup4 + lxml |
@@ -107,23 +110,19 @@ ysp-analyzer/
 
 | 英文（界面） | 中文 |
 |---|---|
-| Crawl | 爬取数据 |
-| Data Table | 数据表格 |
-| Analysis | 数据分析 |
-| Start Crawl | 开始爬取 |
+| Collect | 采集中心 |
+| Snapshots | 数据快照 |
+| Analyze | 单次分析 |
+| Compare | 对比分析 |
+| Pulse Watch | 爆款监测 |
+| Settings | 采集设置 |
+| Start | 开始采集 |
 | Pause / Resume | 暂停 / 继续 |
 | Stop | 停止 |
-| Reset Limit | 重置限制 |
-| Export CSV | 导出CSV |
-| Analyze | 分析 |
-| View | 查看 |
-| Open Dashboard | 综合仪表盘 |
-| Settings | 设置 |
-| Snapshot Manager | 快照管理 |
-| Single Snapshot | 单个快照分析 |
-| Compare Snapshots | 快照对比 |
-| Trend Analysis | 趋势分析（Theil-Sen 回归） |
-| Open Trend | 打开趋势 |
+| Export CSV | 导出 CSV |
+| Dashboard | 综合仪表盘 |
+| Snapshot Manager | 管理快照 |
+| School Detail | 学校详情 |
 | Search School | 搜索学校（自动补全） |
 | confirmed / uncertain | 确认增长 / 不确定（舍入误差内） |
 

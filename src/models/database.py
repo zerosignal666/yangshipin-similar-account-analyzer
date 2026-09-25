@@ -27,6 +27,7 @@ def init_db():
         "request_interval": "3", "max_concurrency": "3",
         "rate_limit_days": "7", "rate_limit_count": "2",
         "display_unit": "万", "timeout_seconds": "30", "max_retries": "3",
+        "burst_mad_multiplier": "3",
         "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     }
     for k, v in defaults.items():
@@ -75,6 +76,12 @@ def get_snapshot(sid: int) -> dict | None:
     row = conn.execute("SELECT * FROM snapshots WHERE id=?", (sid,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def rename_snapshot(sid: int, name: str):
+    conn = _connect()
+    conn.execute("UPDATE snapshots SET name=? WHERE id=?", (name, sid))
+    conn.commit(); conn.close()
 
 
 def delete_snapshot(sid: int):

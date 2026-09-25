@@ -27,12 +27,12 @@ echo Python: "%PY%"
 echo.
 
 REM Check deps
-"%PY%" -c "import tkinter,httpx,bs4,pandas,matplotlib" >nul 2>&1
+"%PY%" -c "import PySide6,httpx,bs4,pandas,matplotlib" >nul 2>&1
 if errorlevel 1 (
     echo Installing dependencies...
-    "%PY%" -m pip install httpx beautifulsoup4 lxml pandas numpy matplotlib openpyxl -q --disable-pip-version-check
+    "%PY%" -m pip install -r requirements.txt -q --disable-pip-version-check
     if errorlevel 1 (
-        echo [ERROR] Install failed. Run: pip install httpx beautifulsoup4 lxml pandas numpy matplotlib openpyxl
+        echo [ERROR] Install failed. Run: pip install -r requirements.txt
         pause
         exit /b 1
     )

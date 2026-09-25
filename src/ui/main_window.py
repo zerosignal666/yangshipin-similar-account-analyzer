@@ -1,936 +1,708 @@
-"""Tkinter GUI —— Python 内置，零额外依赖，完整版"""
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, scrolledtext
-import threading, queue, csv, os, time
+"""PySide6 主界面 —— 校园数据雷达。"""
+import csv
 from datetime import datetime
-import numpy as np
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 import matplotlib.pyplot as plt
-from ..models.database import (init_db, get_all_snapshots, get_snapshot_data,
-    get_snapshot, delete_snapshot, get_setting, set_setting, can_crawl,
-    get_last_crawl_time, reset_crawl_log)
-from ..models.schema import format_value, DISPLAY_UNITS, auto_unit
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from PySide6.QtCore import Qt, Signal, QStringListModel
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QApplication, QButtonGroup, QComboBox, QCompleter, QDialog,
+    QFileDialog, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QScrollArea, QSpinBox, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+)
+
+from ..analysis.charts import bar_top_n, get_cjk_font, setup_font
+from ..analysis.stats import (
+    change_interval, compare_snapshots, compute_stats, to_dataframe,
+)
 from ..crawler.url_parser import parse_account_file
-from ..analysis.stats import (to_dataframe, compute_stats, compare_snapshots,
-    change_interval, theil_sen_slope, detect_spikes)
-from ..analysis.charts import bar_top_n, setup_font, get_cjk_font
+from ..models.database import (
+    can_crawl, delete_snapshot, get_all_snapshots, get_last_crawl_time,
+    get_setting, get_snapshot, get_snapshot_data, init_db, rename_snapshot,
+    reset_crawl_log, set_setting,
+)
+from ..models.schema import DISPLAY_UNITS, auto_unit, format_value
+from .chart_windows import (
+    BarChartWindow, DashboardWindow, HistogramWindow, ScatterWindow, attach_bar_hover,
+    style_figure,
+)
+from .burst_page import BurstMonitorPage
+from .theme import apply_theme, palette
+from .widgets import Card, MetricCard, PageHeader, SectionTitle, UnitStepper, clear_layout
 from .workers import CrawlThread
 
-CBG = "#f5f5f5"; CPRI = "#4472C4"; CRED = "#C00000"; CGRN = "#2E7D32"
-CWR = "#E67E22"; CWHT = "#ffffff"; CPUR = "#7B1FA2"
-CUNCERTAIN = "#A0A0A0"; CCONFIRMED = "#2E7D32"
 
-# ═══════════════════════════════════════════════════════
-#  Crawl Tab
-# ═══════════════════════════════════════════════════════
-class CrawlTab(ttk.Frame):
-    def __init__(self, parent, app):
-        super().__init__(parent); self.app = app
-        self._thread = None; self._accounts = []
-        self._build(); self._load_accounts()
+def _snapshot_label(snapshot: dict) -> str:
+    return f"{snapshot['name']} · {snapshot['created_at'][:16]}"
 
-    def _build(self):
-        self.columnconfigure(0, weight=1)
-        info = ttk.LabelFrame(self, text="Crawl Info", padding=10)
-        info.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,5))
-        info.columnconfigure(1, weight=1)
-        ttk.Label(info, text="Accounts:").grid(row=0, column=0, sticky="w")
-        self.lbl_total = ttk.Label(info, text="--", font=("",12,"bold"), foreground=CPRI)
-        self.lbl_total.grid(row=0, column=1, sticky="w", padx=10)
-        ttk.Label(info, text="Last crawl:").grid(row=1, column=0, sticky="w")
-        self.lbl_last = ttk.Label(info, text="--")
-        self.lbl_last.grid(row=1, column=1, sticky="w", padx=10)
-        ttk.Label(info, text="Rate limit:").grid(row=0, column=2, sticky="w")
-        self.lbl_limit = ttk.Label(info, text="--")
-        self.lbl_limit.grid(row=0, column=3, sticky="w", padx=10)
-        ttk.Label(info, text="Interval:").grid(row=1, column=2, sticky="w")
-        self.lbl_interval = ttk.Label(info, text="--")
-        self.lbl_interval.grid(row=1, column=3, sticky="w", padx=10)
 
-        btn = ttk.Frame(self); btn.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
-        self.btn_start = tk.Button(btn, text="Start Crawl", bg=CPRI, fg="white",
-            font=("",11,"bold"), relief="flat", padx=20, pady=4, command=self._start)
-        self.btn_start.pack(side="left", padx=(0,8))
-        self.btn_pause = tk.Button(btn, text="Pause", state="disabled", padx=12, command=self._toggle_pause)
-        self.btn_pause.pack(side="left", padx=4)
-        self.btn_stop = tk.Button(btn, text="Stop", state="disabled", fg=CRED, padx=12, command=self._stop)
-        self.btn_stop.pack(side="left", padx=4)
-        tk.Button(btn, text="Reset Limit", padx=12, command=self._reset_limit).pack(side="right", padx=4)
+def _format_number(value: float) -> str:
+    number, unit = auto_unit(value or 0)
+    return f"{number:,.1f}{unit}"
 
-        frm = ttk.Frame(self); frm.grid(row=2, column=0, sticky="ew", padx=10, pady=(5,0))
-        self.progress = ttk.Progressbar(frm, mode="determinate"); self.progress.pack(fill="x")
-        self.lbl_progress = ttk.Label(frm, text=""); self.lbl_progress.pack(anchor="w", pady=(2,0))
 
-        ttk.Label(self, text="Log:", font=("",10,"bold")).grid(row=3, column=0, sticky="w", padx=10, pady=(8,0))
-        self.log = scrolledtext.ScrolledText(self, height=18, font=("Consolas",10), state="disabled", wrap="word")
-        self.log.grid(row=4, column=0, sticky="nsew", padx=10, pady=(2,10))
-        self.rowconfigure(4, weight=1)
-        for t,c in [("ok",CGRN),("error",CRED),("warn",CWR),("info","black")]:
-            self.log.tag_config(t, foreground=c)
+def _primary(text: str) -> QPushButton:
+    button = QPushButton(text)
+    button.setObjectName("PrimaryButton")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    return button
 
-    def _load_accounts(self):
+
+def _page_layout(widget: QWidget) -> QVBoxLayout:
+    widget.setObjectName("Page")
+    layout = QVBoxLayout(widget)
+    layout.setContentsMargins(28, 24, 28, 28)
+    layout.setSpacing(18)
+    return layout
+
+
+def _scroll_page(page: QWidget) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(page)
+    return scroll
+
+
+class CrawlPage(QWidget):
+    crawl_completed = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self._thread = None
         self._accounts = parse_account_file()
-        self.lbl_total.config(text=str(len(self._accounts)))
+        self._paused = False
+        box = _page_layout(self)
+        box.addWidget(PageHeader(
+            "01 · COLLECT", "采集中心", "连接央视频公开页面，按既定频率生成一份新的账号快照。"))
+
+        metrics = QHBoxLayout(); metrics.setSpacing(12)
+        self.account_metric = MetricCard("账号队列")
+        self.last_metric = MetricCard("最近采集")
+        self.limit_metric = MetricCard("频率窗口")
+        self.interval_metric = MetricCard("请求间隔")
+        for card in [self.account_metric, self.last_metric, self.limit_metric, self.interval_metric]:
+            metrics.addWidget(card, 1)
+        box.addLayout(metrics)
+
+        signal = Card()
+        signal.box.addWidget(SectionTitle("实时采集轨迹", "每个节点代表一段账号队列；青色表示已经完成。"))
+        self.track = QLabel(); self.track.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.track.setMinimumHeight(44)
+        signal.box.addWidget(self.track)
+        self.progress = QProgressBar(); self.progress.setTextVisible(False)
+        signal.box.addWidget(self.progress)
+        self.progress_text = QLabel("等待开始")
+        self.progress_text.setObjectName("Muted")
+        signal.box.addWidget(self.progress_text)
+        controls = QHBoxLayout()
+        self.start_button = _primary("开始采集")
+        self.pause_button = QPushButton("暂停")
+        self.stop_button = QPushButton("停止")
+        self.stop_button.setObjectName("DangerButton")
+        self.pause_button.setEnabled(False); self.stop_button.setEnabled(False)
+        controls.addWidget(self.start_button); controls.addWidget(self.pause_button)
+        controls.addWidget(self.stop_button); controls.addStretch()
+        signal.box.addLayout(controls)
+        box.addWidget(signal)
+
+        log_card = Card()
+        log_card.box.addWidget(SectionTitle("运行记录", "错误会保留在这里，方便定位失败账号。"))
+        self.log = QTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(210)
+        log_card.box.addWidget(self.log)
+        box.addWidget(log_card)
+        box.addStretch()
+
+        self.start_button.clicked.connect(self.start)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        self.stop_button.clicked.connect(self.stop)
+        self.refresh()
+        self._update_track(0, max(len(self._accounts), 1))
 
     def refresh(self):
-        self._load_accounts()
+        self._accounts = parse_account_file()
         last = get_last_crawl_time()
-        self.lbl_last.config(text=last[:19] if last else "never")
-        d = get_setting("rate_limit_days","7"); c = get_setting("rate_limit_count","2")
-        self.lbl_limit.config(text=f"{d}d max {c} times")
-        self.lbl_interval.config(text=f"{get_setting('request_interval','3')}s/req")
+        days = get_setting("rate_limit_days", "7")
+        count = get_setting("rate_limit_count", "2")
+        self.account_metric.set_data(str(len(self._accounts)), "已载入账号")
+        self.last_metric.set_data(last[:10] if last else "暂无", last[11:19] if last else "尚未生成快照")
+        self.limit_metric.set_data(f"{days} 天 / {count} 次", "保护目标站点")
+        self.interval_metric.set_data(f"{get_setting('request_interval', '3')} 秒", "单次请求间隔")
 
-    def _log(self, msg, level="info"):
-        self.log.config(state="normal")
-        self.log.insert("end", f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", level)
-        self.log.see("end"); self.log.config(state="disabled")
+    def _append_log(self, message: str, level: str = "info"):
+        colors = {"ok": "#2F9D6A", "error": "#D95858", "warn": "#D68B2C", "info": "#69758A"}
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.log.append(f'<span style="color:{colors.get(level, colors["info"])}">[{stamp}] {message}</span>')
 
-    def _start(self):
-        if not self._accounts: messagebox.showwarning("Warning","No accounts found."); return
-        d=int(get_setting("rate_limit_days","7")); c=int(get_setting("rate_limit_count","2"))
-        ok,reason=can_crawl(d,c)
-        if not ok:
-            if not messagebox.askyesno("Rate Limit",f"{reason}\n\nForce start?"): return
-        self.log.config(state="normal"); self.log.delete("1.0","end"); self.log.config(state="disabled")
-        self._log("Starting crawl...","info")
-        snap_name = f"snap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        self._thread = CrawlThread(self._accounts, snap_name)
-        self.btn_start.config(state="disabled")
-        self.btn_pause.config(state="normal", text="Pause")
-        self.btn_stop.config(state="normal")
-        self.progress["maximum"]=len(self._accounts); self.progress["value"]=0
-        self._thread.start(); self._poll()
+    def _update_track(self, current: int, total: int):
+        ratio = current / total if total else 0
+        complete = min(7, int(ratio * 7 + 0.001))
+        c = palette(bool(getattr(self.window(), "is_dark", False)))
+        nodes = []
+        for index in range(7):
+            color = c["signal"] if index < complete else c["line"]
+            nodes.append(f'<span style="font-size:22px;color:{color}">●</span>')
+        self.track.setText(f'<span style="color:{c["line"]}">━━</span>'.join(nodes))
 
-    def _poll(self):
-        if self._thread is None: return
-        t=self._thread
-        try:
-            while True:
-                kind,data=t.mq.get_nowait()
-                if kind=="log": self._log(data[0],data[1])
-                elif kind=="progress":
-                    c,total,name,status,msg=data
-                    self.progress["value"]=c
-                    self.lbl_progress.config(text=f"[{c}/{total}] {'OK' if status=='ok' else 'FAIL'}: {name}  {msg}")
-                elif kind=="done":
-                    sid,total,ok,fail=data
-                    self._log("="*50,"info")
-                    self._log(f"CRAWL DONE: {ok} ok, {fail} fail, {total} total","ok" if fail==0 else "warn")
-                    self.btn_start.config(state="normal")
-                    self.btn_pause.config(state="disabled", text="Pause")
-                    self.btn_stop.config(state="disabled")
-                    self.progress["value"]=0; self.lbl_progress.config(text="")
-                    self.refresh(); self.app.on_crawl_done(sid)
-                    self._thread=None; return
-        except queue.Empty: pass
-        if t.is_alive(): self.after(100, self._poll)
-        else: self._thread=None
+    def start(self):
+        if not self._accounts:
+            QMessageBox.warning(self, "没有账号", "未找到账号列表，请检查“同类账号.txt”。")
+            return
+        days = int(get_setting("rate_limit_days", "7")); count = int(get_setting("rate_limit_count", "2"))
+        allowed, reason = can_crawl(days, count)
+        if not allowed:
+            answer = QMessageBox.question(self, "频率限制", f"{reason}\n\n仍然开始本次采集？")
+            if answer != QMessageBox.StandardButton.Yes: return
+        self.log.clear(); self._append_log("开始建立新快照")
+        name = f"snap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self._thread = CrawlThread(self._accounts, name)
+        self._thread.log.connect(self._append_log)
+        self._thread.progress.connect(self._on_progress)
+        self._thread.finished_crawl.connect(self._on_done)
+        self._thread.failed.connect(self._on_failed)
+        self.progress.setRange(0, len(self._accounts)); self.progress.setValue(0)
+        self.start_button.setEnabled(False); self.pause_button.setEnabled(True); self.stop_button.setEnabled(True)
+        self._paused = False; self.pause_button.setText("暂停")
+        self._thread.start()
 
-    def _toggle_pause(self):
-        if self._thread is None: return
-        if self.btn_pause.cget("text")=="Pause":
-            self._thread.pause(); self.btn_pause.config(text="Resume")
-            self._log("-- PAUSED --","warn")
+    def _on_progress(self, current: int, total: int, name: str, status: str, message: str):
+        self.progress.setRange(0, total); self.progress.setValue(current)
+        label = "完成" if status == "ok" else "失败"
+        self.progress_text.setText(f"{current} / {total} · {label} · {name}  {message}")
+        self._update_track(current, total)
+
+    def _on_done(self, snapshot_id: int, total: int, success: int, failed: int):
+        self._append_log(f"采集完成：成功 {success}，失败 {failed}，共 {total}", "ok" if failed == 0 else "warn")
+        self.progress_text.setText(f"快照已保存 · 成功 {success} / {total}")
+        self._finish_controls(); self.refresh(); self.crawl_completed.emit(snapshot_id)
+
+    def _on_failed(self, message: str):
+        self._append_log(message, "error"); self._finish_controls()
+        QMessageBox.critical(self, "采集失败", message)
+
+    def _finish_controls(self):
+        self.start_button.setEnabled(True); self.pause_button.setEnabled(False); self.stop_button.setEnabled(False)
+        self._paused = False; self.pause_button.setText("暂停")
+
+    def toggle_pause(self):
+        if not self._thread: return
+        if self._paused:
+            self._thread.resume(); self.pause_button.setText("暂停"); self._append_log("继续采集")
         else:
-            self._thread.resume(); self.btn_pause.config(text="Pause")
-            self._log("-- RESUMED --","info")
+            self._thread.pause(); self.pause_button.setText("继续"); self._append_log("已暂停", "warn")
+        self._paused = not self._paused
 
-    def _stop(self):
-        if self._thread: self._thread.stop()
-        self.btn_start.config(state="normal")
-        self.btn_pause.config(state="disabled", text="Pause")
-        self.btn_stop.config(state="disabled")
-        self._log("-- STOPPED --","warn"); self.refresh()
+    def stop(self):
+        if self._thread:
+            self._thread.stop(); self._append_log("正在安全停止…", "warn")
 
-    def _reset_limit(self):
-        if messagebox.askyesno("Confirm","Reset rate limit counter?"):
-            reset_crawl_log(); self._log("Rate limit reset","warn"); self.refresh()
+    def is_running(self) -> bool:
+        return bool(self._thread and self._thread.isRunning())
 
-# ═══════════════════════════════════════════════════════
-#  Data Table Tab
-# ═══════════════════════════════════════════════════════
-class DataTableTab(ttk.Frame):
-    def __init__(self, parent, app):
-        super().__init__(parent); self.app = app
-        self._data = []; self._visible = []
-        self._unit = tk.StringVar(value="万"); self._build()
+    def theme_changed(self):
+        self._update_track(self.progress.value(), max(self.progress.maximum(), 1))
 
-    def _build(self):
-        self.columnconfigure(0, weight=1)
-        bar = ttk.Frame(self); bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10,5))
-        ttk.Label(bar, text="Snapshot:").pack(side="left")
-        self.cb_snap = ttk.Combobox(bar, state="readonly", width=35)
-        self.cb_snap.pack(side="left", padx=5)
-        self.cb_snap.bind("<<ComboboxSelected>>", self._on_snap)
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=15)
-        ttk.Label(bar, text="Unit:").pack(side="left")
-        cb = ttk.Combobox(bar, textvariable=self._unit, values=DISPLAY_UNITS, state="readonly", width=5)
-        cb.pack(side="left", padx=5)
-        cb.bind("<<ComboboxSelected>>", lambda e: self._reload())
-        ttk.Label(bar, text="Search:").pack(side="left", padx=(15,5))
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *a: self._apply_filter())
-        ttk.Entry(bar, textvariable=self.search_var, width=18).pack(side="left")
-        tk.Button(bar, text="Export CSV", padx=12, command=self._export).pack(side="right", padx=4)
 
-        self.lbl_status = ttk.Label(self, text="")
-        self.lbl_status.grid(row=1, column=0, sticky="w", padx=10)
+class SnapshotManagerDialog(QDialog):
+    changed = Signal()
 
-        ft = ttk.Frame(self); ft.grid(row=2, column=0, sticky="nsew", padx=10, pady=(2,10))
-        ft.columnconfigure(0, weight=1); ft.rowconfigure(0, weight=1)
-        self.rowconfigure(2, weight=1)
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("管理快照"); self.resize(640, 520)
+        box = QVBoxLayout(self)
+        box.addWidget(SectionTitle("快照管理", "重命名只改变显示名称；删除会同时移除该快照中的账号记录。"))
+        self.list = QListWidget(); self.list.currentRowChanged.connect(self._show_detail)
+        box.addWidget(self.list, 1)
+        self.detail = QLabel(); self.detail.setObjectName("Muted"); self.detail.setWordWrap(True)
+        box.addWidget(self.detail)
+        actions = QHBoxLayout(); actions.addStretch()
+        rename = QPushButton("重命名"); delete = QPushButton("删除"); delete.setObjectName("DangerButton")
+        close = QPushButton("关闭")
+        actions.addWidget(rename); actions.addWidget(delete); actions.addWidget(close); box.addLayout(actions)
+        rename.clicked.connect(self._rename); delete.clicked.connect(self._delete); close.clicked.connect(self.accept)
+        self._refresh()
 
-        cols = ("rank","name","fans","plays","videos","desc")
-        self.tree = ttk.Treeview(ft, columns=cols, show="headings", selectmode="extended")
-        headings = [("rank","#",lambda:self._sort("fans_base",True)),
-                    ("name","Name",lambda:self._sort("name",False)),
-                    ("fans","Fans",lambda:self._sort("fans_base",True)),
-                    ("plays","Plays",lambda:self._sort("play_base",True)),
-                    ("videos","Videos",lambda:self._sort("video_cnt",True)),
-                    ("desc","Description")]
-        for item in headings:
-            if len(item)==3:
-                self.tree.heading(item[0], text=item[1], command=item[2])
-            else:
-                self.tree.heading(item[0], text=item[1])
-        self.tree.column("rank", width=45, anchor="center")
-        self.tree.column("name", width=150); self.tree.column("fans", width=100, anchor="center")
-        self.tree.column("plays", width=100, anchor="center")
-        self.tree.column("videos", width=70, anchor="center")
-        self.tree.column("desc", width=280)
+    def _refresh(self):
+        self.snapshots = get_all_snapshots(); self.list.clear()
+        for snap in self.snapshots:
+            self.list.addItem(f"{snap['name']}   ·   {snap['created_at'][:16]}   ·   {snap['success_count']}/{snap['total_count']}")
+        if self.snapshots: self.list.setCurrentRow(0)
 
-        vsb = ttk.Scrollbar(ft, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew"); vsb.grid(row=0, column=1, sticky="ns")
+    def _show_detail(self, row: int):
+        if row < 0 or row >= len(self.snapshots): self.detail.clear(); return
+        snap = self.snapshots[row]; data = get_snapshot_data(snap["id"])
+        leaders = "、".join(item["name"] for item in sorted(data, key=lambda x: x.get("fans_base", 0) or 0, reverse=True)[:5])
+        self.detail.setText(
+            f"创建于 {snap['created_at'][:19]} · 成功 {snap['success_count']} · 失败 {snap['fail_count']}\n"
+            f"粉丝 TOP 5：{leaders or '暂无数据'}")
 
-        # WUST 红色高亮标签
-        self.tree.tag_configure("hl", foreground=CRED, font=("",10,"bold"))
-        self._sort_col = "fans_base"; self._sort_desc = True
+    def _rename(self):
+        row = self.list.currentRow()
+        if row < 0: return
+        field = QLineEdit(self.snapshots[row]["name"])
+        dialog = QDialog(self); dialog.setWindowTitle("重命名快照")
+        box = QVBoxLayout(dialog); box.addWidget(QLabel("新的快照名称")); box.addWidget(field)
+        save = _primary("保存名称"); box.addWidget(save); save.clicked.connect(dialog.accept)
+        if dialog.exec() and field.text().strip():
+            rename_snapshot(self.snapshots[row]["id"], field.text().strip())
+            self._refresh(); self.changed.emit()
 
-    def refresh_snapshots(self):
-        snaps = get_all_snapshots()
-        items = [f"{s['name']} ({s['created_at'][:16]}) - {s['success_count']}/{s['total_count']}" for s in snaps]
-        self.cb_snap["values"] = items; self._snapshots = snaps
-        if snaps: self.cb_snap.current(0); self._on_snap()
+    def _delete(self):
+        row = self.list.currentRow()
+        if row < 0: return
+        snap = self.snapshots[row]
+        answer = QMessageBox.question(
+            self, "确认删除", f"删除“{snap['name']}”及其中 {snap['total_count']} 条记录？\n此操作无法撤销。")
+        if answer == QMessageBox.StandardButton.Yes:
+            delete_snapshot(snap["id"]); self._refresh(); self.changed.emit()
 
-    def _on_snap(self, event=None):
-        idx = self.cb_snap.current()
-        if idx<0 or idx>=len(self._snapshots): return
-        self._data = get_snapshot_data(self._snapshots[idx]["id"]); self._apply_filter()
 
-    def _reload(self): self._apply_filter()
+class DataPage(QWidget):
+    snapshots_changed = Signal()
 
-    def _fmt(self, base_val, orig_unit=""):
-        if base_val is None or base_val==0: return "-"
-        v,u = format_value(base_val, self._unit.get())
-        if v>=10000: return f"{v:,.0f} {u}"
-        if v>=100: return f"{v:,.1f} {u}"
-        if v>=1: return f"{v:,.2f} {u}"
-        return f"{v:,.4f} {u}"
+    def __init__(self):
+        super().__init__(); self.snapshots = []; self.data = []; self.visible = []
+        self.sort_column = "fans_base"; self.sort_desc = True
+        box = _page_layout(self)
+        header = QHBoxLayout()
+        header.addWidget(PageHeader("02 · SNAPSHOTS", "数据快照", "筛选、排序并导出任意一次采集结果。"), 1)
+        manage = QPushButton("管理快照"); export = _primary("导出 CSV")
+        header.addWidget(manage); header.addWidget(export); box.addLayout(header)
+        tools = Card(); row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("快照")); self.snapshot_combo = QComboBox(); self.snapshot_combo.setMinimumWidth(290)
+        row.addWidget(self.snapshot_combo, 1)
+        row.addWidget(QLabel("单位")); self.unit_combo = QComboBox(); self.unit_combo.addItems(DISPLAY_UNITS)
+        self.unit_combo.setCurrentText(get_setting("display_unit", "万")); row.addWidget(self.unit_combo)
+        row.addWidget(QLabel("搜索")); self.search = QLineEdit(); self.search.setPlaceholderText("输入学校名称")
+        self.search.setClearButtonEnabled(True); self.search.setMaximumWidth(240); row.addWidget(self.search)
+        tools.box.addLayout(row); box.addWidget(tools)
+        self.status = QLabel(); self.status.setObjectName("Muted"); box.addWidget(self.status)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["#", "学校", "粉丝", "播放", "视频", "简介"])
+        self.table.setAlternatingRowColors(True); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        header_view = self.table.horizontalHeader(); header_view.setStretchLastSection(True)
+        header_view.resizeSection(0, 48); header_view.resizeSection(1, 180)
+        header_view.resizeSection(2, 120); header_view.resizeSection(3, 120); header_view.resizeSection(4, 80)
+        self.table.setMinimumHeight(500); box.addWidget(self.table, 1)
+        self.snapshot_combo.currentIndexChanged.connect(self._load_snapshot)
+        self.unit_combo.currentTextChanged.connect(self._unit_changed)
+        self.search.textChanged.connect(self._render)
+        header_view.sectionClicked.connect(self._sort)
+        manage.clicked.connect(self._manage); export.clicked.connect(self._export)
+        self.refresh_snapshots()
 
-    def _apply_filter(self):
-        txt = self.search_var.get().strip().lower()
-        for item in self.tree.get_children(): self.tree.delete(item)
-        visible = self._data
-        if txt: visible = [d for d in visible if txt in d.get("name","").lower()]
-        H="武汉科技大学"
-        for i,d in enumerate(visible):
-            tags = ("hl",) if d.get("name","")==H else ()
-            self.tree.insert("","end",iid=str(i), values=(
-                i+1, d["name"],
-                self._fmt(d["fans_base"], d.get("fans_unit","")),
-                self._fmt(d["play_base"], d.get("play_unit","")),
-                str(d.get("video_cnt",0)),
-                d.get("description",""),
-            ), tags=tags)
-        self.lbl_status.config(text=f"{len(visible)} records")
-        self._visible = visible
+    def refresh_snapshots(self, select_id=None):
+        current_id = select_id or self.snapshot_combo.currentData()
+        self.snapshots = get_all_snapshots(); self.snapshot_combo.blockSignals(True); self.snapshot_combo.clear()
+        for snap in self.snapshots: self.snapshot_combo.addItem(_snapshot_label(snap), snap["id"])
+        if current_id:
+            index = self.snapshot_combo.findData(current_id)
+            if index >= 0: self.snapshot_combo.setCurrentIndex(index)
+        self.snapshot_combo.blockSignals(False); self._load_snapshot()
 
-    def _sort(self, col, numeric):
-        if self._sort_col==col: self._sort_desc = not self._sort_desc
-        else: self._sort_col=col; self._sort_desc=numeric
-        if numeric: self._data.sort(key=lambda x: x.get(col,0) or 0, reverse=self._sort_desc)
-        else: self._data.sort(key=lambda x: str(x.get(col,"")).lower(), reverse=self._sort_desc)
-        self._apply_filter()
+    def _load_snapshot(self):
+        snapshot_id = self.snapshot_combo.currentData()
+        self.data = get_snapshot_data(snapshot_id) if snapshot_id else []
+        self._render()
+
+    def _unit_changed(self, unit: str):
+        set_setting("display_unit", unit); self._render()
+
+    def _format(self, value):
+        if value is None or value == 0: return "—"
+        number, unit = format_value(value, self.unit_combo.currentText())
+        precision = 0 if number >= 10000 else 1 if number >= 100 else 2 if number >= 1 else 4
+        return f"{number:,.{precision}f} {unit}"
+
+    def _render(self):
+        query = self.search.text().strip().lower()
+        self.visible = [item for item in self.data if not query or query in item.get("name", "").lower()]
+        self.table.setSortingEnabled(False); self.table.setRowCount(len(self.visible))
+        c = palette(bool(getattr(self.window(), "is_dark", False)))
+        for row, item in enumerate(self.visible):
+            values = [str(row + 1), item["name"], self._format(item.get("fans_base")),
+                      self._format(item.get("play_base")), str(item.get("video_cnt", 0)), item.get("description", "")]
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                if column in [0, 2, 3, 4]: cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if item.get("name") == "武汉科技大学":
+                    cell.setForeground(QColor(c["danger"])); font = cell.font(); font.setBold(True); cell.setFont(font)
+                self.table.setItem(row, column, cell)
+        self.status.setText(f"显示 {len(self.visible)} / {len(self.data)} 条记录")
+
+    def _sort(self, section: int):
+        columns = {0: "fans_base", 1: "name", 2: "fans_base", 3: "play_base", 4: "video_cnt"}
+        key = columns.get(section)
+        if not key: return
+        if self.sort_column == key: self.sort_desc = not self.sort_desc
+        else: self.sort_column = key; self.sort_desc = key != "name"
+        if key == "name": self.data.sort(key=lambda item: item.get(key, "").lower(), reverse=self.sort_desc)
+        else: self.data.sort(key=lambda item: item.get(key, 0) or 0, reverse=self.sort_desc)
+        self._render()
 
     def _export(self):
-        idx = self.cb_snap.current()
-        if idx<0: return
-        snap = get_snapshot(self._snapshots[idx]["id"])
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")],
-                                            initialfile=f"ysp_{snap['name']}.csv")
+        snapshot_id = self.snapshot_combo.currentData()
+        if not snapshot_id: return
+        snap = get_snapshot(snapshot_id)
+        path, _ = QFileDialog.getSaveFileName(self, "导出快照", f"ysp_{snap['name']}.csv", "CSV (*.csv)")
         if not path: return
-        try:
-            with open(path,"w",newline="",encoding="utf-8-sig") as f:
-                w=csv.writer(f)
-                w.writerow(["#","Name","Fans","Plays","Videos","Description","CPID"])
-                for i,d in enumerate(self._data):
-                    w.writerow([i+1,d["name"],self._fmt(d["fans_base"],d.get("fans_unit","")),
-                        self._fmt(d["play_base"],d.get("play_unit","")),d["video_cnt"],
-                        d.get("description",""),d["cp_id"]])
-            messagebox.showinfo("OK",f"Exported to:\n{path}")
-        except Exception as e: messagebox.showerror("Error",str(e))
+        with open(path, "w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.writer(file); writer.writerow(["#", "学校", "粉丝", "播放", "视频", "简介", "CPID"])
+            for index, item in enumerate(self.data):
+                writer.writerow([index + 1, item["name"], item.get("fans_base"), item.get("play_base"),
+                                 item.get("video_cnt"), item.get("description", ""), item.get("cp_id", "")])
+        QMessageBox.information(self, "导出完成", f"文件已保存到：\n{path}")
 
-# ═══════════════════════════════════════════════════════
-#  Analysis Tab
-# ═══════════════════════════════════════════════════════
-class AnalysisTab(ttk.Frame):
-    def __init__(self, parent, app):
-        super().__init__(parent); self.app = app
-        self._snapshots = []; self._chart_vars = {}; self._chart_cfgs = {}
+    def _manage(self):
+        dialog = SnapshotManagerDialog(self); dialog.changed.connect(self._manager_changed); dialog.exec()
+
+    def _manager_changed(self):
+        self.refresh_snapshots(); self.snapshots_changed.emit()
+
+
+class AnalysisPage(QWidget):
+    def __init__(self):
+        super().__init__(); self.snapshots = []; self.df = None; self.preview_figure = None
+        box = _page_layout(self)
+        box.addWidget(PageHeader("03 · EXPLORE", "单次分析", "从一个快照读取分布、排名与账号之间的关系。"))
+        controls = Card(); row = QHBoxLayout(); row.setSpacing(10)
+        row.addWidget(QLabel("快照")); self.snapshot_combo = QComboBox(); self.snapshot_combo.setMinimumWidth(290); row.addWidget(self.snapshot_combo, 1)
+        row.addWidget(QLabel("TOP")); self.top_n = QSpinBox(); self.top_n.setRange(5, 100); self.top_n.setValue(15); row.addWidget(self.top_n)
+        row.addWidget(QLabel("重点学校")); self.highlight = QLineEdit("武汉科技大学"); row.addWidget(self.highlight)
+        analyze = _primary("生成分析"); row.addWidget(analyze); controls.box.addLayout(row); box.addWidget(controls)
+        metrics = QHBoxLayout(); metrics.setSpacing(12)
+        self.account_metric = MetricCard("账号数"); self.fans_metric = MetricCard("粉丝总量")
+        self.plays_metric = MetricCard("播放总量"); self.videos_metric = MetricCard("视频总量")
+        for item in [self.account_metric, self.fans_metric, self.plays_metric, self.videos_metric]: metrics.addWidget(item, 1)
+        box.addLayout(metrics)
+        chart = Card(); chart.box.addWidget(SectionTitle("排名预览", "默认显示粉丝 TOP；下方按钮打开完整交互图表。"))
+        self.preview = QVBoxLayout(); chart.box.addLayout(self.preview)
+        actions = QHBoxLayout()
+        for text, method in [("粉丝排名", self._fans), ("播放排名", self._plays),
+                             ("粉丝分布", self._distribution), ("粉丝 × 播放", self._scatter),
+                             ("打开仪表盘", self._dashboard)]:
+            button = QPushButton(text); button.clicked.connect(method); actions.addWidget(button)
+        actions.addStretch(); chart.box.addLayout(actions); box.addWidget(chart)
+        box.addStretch(); analyze.clicked.connect(self.analyze); self.refresh_snapshots()
+
+    def refresh_snapshots(self):
+        selected = self.snapshot_combo.currentData(); self.snapshots = get_all_snapshots()
+        self.snapshot_combo.clear()
+        for snap in self.snapshots: self.snapshot_combo.addItem(_snapshot_label(snap), snap["id"])
+        if selected:
+            index = self.snapshot_combo.findData(selected)
+            if index >= 0: self.snapshot_combo.setCurrentIndex(index)
+
+    def analyze(self):
+        snapshot_id = self.snapshot_combo.currentData()
+        if not snapshot_id: return
+        self.df = to_dataframe(get_snapshot_data(snapshot_id))
+        if self.df.empty: return
+        stats = compute_stats(self.df); highlight = self.highlight.text().strip()
+        focus = self.df[self.df["name"] == highlight] if highlight else self.df.iloc[0:0]
+        focus_note = ""
+        if not focus.empty:
+            row = focus.iloc[0]; rank = int((self.df["fans_base"] > row["fans_base"]).sum() + 1)
+            focus_note = f"{highlight} 排名 #{rank}"
+        self.account_metric.set_data(str(stats["total"]), focus_note)
+        self.fans_metric.set_data(_format_number(stats["fans"]["sum"]), f"中位数 {stats['fans']['median']:,.0f}")
+        self.plays_metric.set_data(_format_number(stats["plays"]["sum"]), f"中位数 {stats['plays']['median']:,.0f}")
+        self.videos_metric.set_data(f"{stats['videos']['sum']:,}", f"平均 {stats['videos']['mean']:.1f}")
+        self._render_preview()
+
+    def _render_preview(self):
+        clear_layout(self.preview)
+        if self.preview_figure: plt.close(self.preview_figure)
+        if self.df is None or self.df.empty:
+            note = QLabel("选择快照后生成分析"); note.setObjectName("Muted"); self.preview.addWidget(note); return
+        self.preview_figure = bar_top_n(self.df, "fans_base", self.top_n.value(), "粉丝排名", self.highlight.text().strip())
+        style_figure(self.preview_figure, self)
+        canvas = FigureCanvasQTAgg(self.preview_figure); canvas.setMinimumHeight(360); canvas.draw()
+        attach_bar_hover(canvas, self)
+        self.preview_canvas = canvas
+        self.preview.addWidget(canvas)
+
+    def _ready(self) -> bool:
+        if self.df is None or self.df.empty:
+            QMessageBox.information(self, "尚未分析", "请先选择快照并生成分析。")
+            return False
+        return True
+
+    def _fans(self):
+        if self._ready(): BarChartWindow(self, self.df, "fans_base", self.top_n.value(), "粉丝排名", self.highlight.text().strip())
+
+    def _plays(self):
+        if self._ready(): BarChartWindow(self, self.df, "play_base", self.top_n.value(), "播放排名", self.highlight.text().strip())
+
+    def _distribution(self):
+        if not self._ready(): return
+        highlight = self.highlight.text().strip(); match = self.df[self.df["name"] == highlight]
+        value = match.iloc[0]["fans_base"] if not match.empty else None
+        HistogramWindow(self, self.df, "fans_base", "粉丝分布", 20, highlight, value)
+
+    def _scatter(self):
+        if self._ready(): ScatterWindow(self, self.df, "fans_base", "play_base", "粉丝", "播放", "粉丝与播放关系", self.highlight.text().strip())
+
+    def _dashboard(self):
+        if not self._ready(): return
+        count = self.top_n.value()
+        configs = [
+            {"type": "bar", "col": "fans_base", "n": count, "title": "粉丝排名"},
+            {"type": "bar", "col": "play_base", "n": count, "title": "播放排名"},
+            {"type": "hist", "col": "fans_base", "bins": 20, "title": "粉丝分布"},
+            {"type": "scatter", "x": "fans_base", "y": "play_base", "title": "粉丝 × 播放"},
+        ]
+        DashboardWindow(self, self.df, configs, self.highlight.text().strip())
+
+    def theme_changed(self):
+        if self.df is not None and not self.df.empty: self._render_preview()
+
+
+class ComparePage(QWidget):
+    def __init__(self):
+        super().__init__(); self.snapshots = []; self.result = None; self.figures = []
+        box = _page_layout(self)
+        box.addWidget(PageHeader("04 · COMPARE", "对比分析", "比较两个时间点，查看全局增长排行与指定学校的量化误差。"))
+        controls = Card(); row = QGridLayout(); row.setHorizontalSpacing(10); row.setVerticalSpacing(10)
+        self.combo_a = QComboBox(); self.combo_b = QComboBox(); self.combo_a.setMinimumWidth(260); self.combo_b.setMinimumWidth(260)
+        self.highlight = QLineEdit("武汉科技大学"); compare = _primary("开始对比")
+        row.addWidget(QLabel("基准快照"), 0, 0); row.addWidget(self.combo_a, 0, 1)
+        row.addWidget(QLabel("对比快照"), 0, 2); row.addWidget(self.combo_b, 0, 3)
+        row.addWidget(QLabel("重点学校"), 1, 0); row.addWidget(self.highlight, 1, 1)
+        row.addWidget(compare, 1, 3); controls.box.addLayout(row); box.addWidget(controls)
+        metrics = QHBoxLayout(); metrics.setSpacing(12)
+        self.fans_metric = MetricCard("粉丝变化"); self.plays_metric = MetricCard("播放变化")
+        self.videos_metric = MetricCard("视频变化"); self.accounts_metric = MetricCard("账号变化")
+        for item in [self.fans_metric, self.plays_metric, self.videos_metric, self.accounts_metric]: metrics.addWidget(item, 1)
+        box.addLayout(metrics)
+        inspect = Card(); inspect.box.addWidget(SectionTitle("学校检查器", "搜索任意学校，查看两个端点之间的变化及取整误差。"))
+        search_row = QHBoxLayout(); self.school_search = QLineEdit(); self.school_search.setPlaceholderText("输入学校名称")
+        self.school_search.setClearButtonEnabled(True)
+        search_row.addWidget(self.school_search, 1); inspect.box.addLayout(search_row)
+        self.school_detail = QLabel("完成一次对比后可搜索学校"); self.school_detail.setObjectName("Muted"); self.school_detail.setWordWrap(True)
+        inspect.box.addWidget(self.school_detail); box.addWidget(inspect)
+        charts = Card(); charts.box.addWidget(SectionTitle("增长信号", "浅色或跨越零点的变化可能来自“万”单位取整。"))
+        self.chart_grid = QGridLayout(); self.chart_grid.setSpacing(10); charts.box.addLayout(self.chart_grid); box.addWidget(charts)
+        box.addStretch()
+        compare.clicked.connect(self.compare); self.school_search.textChanged.connect(self._show_school)
+        self.refresh_snapshots()
+
+    def refresh_snapshots(self):
+        self.snapshots = get_all_snapshots(); self.combo_a.clear(); self.combo_b.clear()
+        for snap in self.snapshots:
+            label = _snapshot_label(snap); self.combo_a.addItem(label, snap["id"]); self.combo_b.addItem(label, snap["id"])
+        if len(self.snapshots) >= 2: self.combo_a.setCurrentIndex(len(self.snapshots) - 1); self.combo_b.setCurrentIndex(0)
+
+    def _snapshot(self, combo: QComboBox):
+        snapshot_id = combo.currentData()
+        snap = next((item for item in self.snapshots if item["id"] == snapshot_id), None)
+        return snap, get_snapshot_data(snapshot_id) if snapshot_id else []
+
+    def compare(self):
+        snap_a, data_a = self._snapshot(self.combo_a); snap_b, data_b = self._snapshot(self.combo_b)
+        if not data_a or not data_b: return
+        if snap_a["id"] == snap_b["id"]:
+            QMessageBox.warning(self, "快照重复", "请选择两个不同的快照。")
+            return
+        if snap_a["created_at"] > snap_b["created_at"]:
+            snap_a, snap_b = snap_b, snap_a; data_a, data_b = data_b, data_a
+        self.snap_a = snap_a; self.snap_b = snap_b
+        self.result = compare_snapshots(data_a, data_b, snap_a["name"], snap_b["name"])
+        summary = self.result["summary"]; days = self._time_span()
+        self.fans_metric.set_data(f"{summary['fans_chg']:+,.0f}", f"{days} 天观察窗口")
+        self.plays_metric.set_data(f"{summary['play_chg']:+,.0f}", "累计播放变化")
+        self.videos_metric.set_data(f"{summary['video_chg']:+,}", "新增发布数量")
+        self.accounts_metric.set_data(f"{summary['acct_chg']:+d}", f"新增 {len(self.result['new'])} · 消失 {len(self.result['gone'])}")
+        names = sorted({item["name"] for item in self.result.get("all", [])})
+        completer = QCompleter(QStringListModel(names, self), self.school_search)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive); completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.school_search.setCompleter(completer)
+        self.school_search.setText(self.highlight.text().strip()); self._render_charts(); self._show_school()
+
+    def _time_span(self) -> int:
+        a = datetime.fromisoformat(self.snap_a["created_at"]); b = datetime.fromisoformat(self.snap_b["created_at"])
+        return max(0, (b - a).days)
+
+    def _show_school(self):
+        if not self.result: return
+        query = self.school_search.text().strip().lower()
+        if not query: self.school_detail.setText("输入学校名称查看变化区间"); return
+        item = next((row for row in self.result.get("all", []) if row.get("name", "").lower() == query), None)
+        if item is None: item = next((row for row in self.result.get("all", []) if query in row.get("name", "").lower()), None)
+        if item is None: self.school_detail.setText("没有匹配的学校"); return
+        ua = item.get(f"fans_unit_{self.snap_a['name']}", "个"); ub = item.get(f"fans_unit_{self.snap_b['name']}", "个")
+        pa = item.get(f"play_unit_{self.snap_a['name']}", "个"); pb = item.get(f"play_unit_{self.snap_b['name']}", "个")
+        _, flo, fhi, fconf = change_interval(item.get(f"fans_{self.snap_a['name']}", 0), ua,
+                                             item.get(f"fans_{self.snap_b['name']}", 0), ub)
+        _, plo, phi, pconf = change_interval(item.get(f"play_{self.snap_a['name']}", 0), pa,
+                                             item.get(f"play_{self.snap_b['name']}", 0), pb)
+        self.school_detail.setText(
+            f"{item['name']}\n粉丝 {item.get('fans_chg', 0):+,.0f} · 区间 {flo:+,.0f} ～ {fhi:+,.0f} · "
+            f"{'已确认' if fconf == 'confirmed' else '仍在取整误差内'}\n"
+            f"播放 {item.get('play_chg', 0):+,.0f} · 区间 {plo:+,.0f} ～ {phi:+,.0f} · "
+            f"{'已确认' if pconf == 'confirmed' else '仍在取整误差内'}")
+
+    def _render_charts(self):
+        clear_layout(self.chart_grid)
+        for fig in self.figures: plt.close(fig)
+        self.figures = []
+        c = palette(bool(getattr(self.window(), "is_dark", False)))
+        specs = [
+            (self.result["fans_growth"], "fans_chg", "粉丝增长", c["signal"]),
+            (self.result["play_growth"], "play_chg", "播放增长", c["success"]),
+            (self.result["video_growth"], "video_chg", "视频增长", c["primary"]),
+            (self.result["ppv_growth"], "play_per_video", "单条新视频播放", c["warning"]),
+        ]
+        for index, (data, column, title, color) in enumerate(specs):
+            fig = self._growth_figure(data, column, title, color); self.figures.append(fig)
+            canvas = FigureCanvasQTAgg(fig); attach_bar_hover(canvas, self)
+            canvas.setMinimumHeight(310); canvas.draw()
+            self.chart_grid.addWidget(canvas, index // 2, index % 2)
+
+    def _growth_figure(self, data, column, title, color):
+        setup_font(); fp = get_cjk_font(); c = palette(bool(getattr(self.window(), "is_dark", False)))
+        rows = sorted(data[:10], key=lambda item: item.get(column, 0) or 0)
+        names = [item["name"] for item in rows]; values = [item.get(column, 0) or 0 for item in rows]
+        colors = [c["danger"] if value < 0 else color for value in values]
+        fig, ax = plt.subplots(figsize=(5.6, 3.5), dpi=100)
+        ax.barh(range(len(names)), values, color=colors)
+        ax.set_yticks(range(len(names))); ax.set_yticklabels(names, fontsize=8, fontproperties=fp)
+        ax.set_title(title, fontsize=12, fontweight="bold", fontproperties=fp)
+        ax.axvline(0, color=c["line"], linewidth=0.8); style_figure(fig, self); fig.tight_layout(pad=1.2)
+        return fig
+
+    def theme_changed(self):
+        if self.result: self._render_charts()
+
+
+class SettingsPage(QWidget):
+    saved = Signal()
+
+    def __init__(self):
+        super().__init__(); box = _page_layout(self)
+        box.addWidget(PageHeader("06 · SETTINGS", "采集设置", "控制请求节奏与保护阈值；修改后立即用于下一次采集。"))
+        card = Card(); card.box.addWidget(SectionTitle("网络与频率", "建议保留默认值，避免给目标站点造成压力。"))
+        form = QFormLayout(); form.setVerticalSpacing(12)
+        self.interval = UnitStepper(0.5, 120, 3, 0.5, 1, "秒")
+        self.concurrency = UnitStepper(1, 10, 3, 1, 0, "个任务")
+        self.timeout = UnitStepper(5, 180, 30, 5, 0, "秒")
+        self.retries = UnitStepper(0, 10, 3, 1, 0, "次")
+        self.days = UnitStepper(1, 365, 7, 1, 0, "天")
+        self.count = UnitStepper(1, 100, 2, 1, 0, "次")
+        for label, widget in [("请求间隔", self.interval), ("最大并发", self.concurrency), ("请求超时", self.timeout),
+                              ("最大重试", self.retries), ("频率窗口", self.days), ("窗口内上限", self.count)]:
+            form.addRow(label, widget)
+        card.box.addLayout(form); save = _primary("保存设置"); save.clicked.connect(self._save); card.box.addWidget(save)
+        box.addWidget(card)
+        danger = Card(); danger.box.addWidget(SectionTitle("维护", "仅清除频率计数记录，不删除数据快照。"))
+        reset = QPushButton("重置频率记录"); reset.setObjectName("DangerButton"); reset.clicked.connect(self._reset)
+        danger.box.addWidget(reset); box.addWidget(danger); box.addStretch(); self._load()
+
+    def _load(self):
+        self.interval.setValue(float(get_setting("request_interval", "3")))
+        self.concurrency.setValue(int(get_setting("max_concurrency", "3")))
+        self.timeout.setValue(int(get_setting("timeout_seconds", "30")))
+        self.retries.setValue(int(get_setting("max_retries", "3")))
+        self.days.setValue(int(get_setting("rate_limit_days", "7")))
+        self.count.setValue(int(get_setting("rate_limit_count", "2")))
+
+    def _save(self):
+        values = {
+            "request_interval": f"{self.interval.value():g}", "max_concurrency": str(int(self.concurrency.value())),
+            "timeout_seconds": str(int(self.timeout.value())), "max_retries": str(int(self.retries.value())),
+            "rate_limit_days": str(int(self.days.value())), "rate_limit_count": str(int(self.count.value())),
+        }
+        for key, value in values.items(): set_setting(key, value)
+        QMessageBox.information(self, "设置已保存", "新的设置将在下一次采集时生效。")
+        self.saved.emit()
+
+    def _reset(self):
+        answer = QMessageBox.question(self, "确认重置", "清除全部频率计数记录？\n数据快照不会被删除。")
+        if answer == QMessageBox.StandardButton.Yes:
+            reset_crawl_log(); QMessageBox.information(self, "已重置", "频率计数记录已清除。"); self.saved.emit()
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__(); init_db()
+        self.is_dark = get_setting("theme", "light") == "dark"
+        apply_theme(QApplication.instance(), self.is_dark)
+        self.setWindowTitle("YSP 校园数据雷达")
+        self.resize(1280, 820); self.setMinimumSize(1050, 700)
         self._build()
 
     def _build(self):
-        self.columnconfigure(0, weight=1)
-        nb = ttk.Notebook(self); nb.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.rowconfigure(0, weight=1)
-        f1 = ttk.Frame(nb); nb.add(f1, text="Single Snapshot"); self._build_single(f1)
-        f2 = ttk.Frame(nb); nb.add(f2, text="Compare Snapshots"); self._build_compare(f2)
+        root = QWidget(); root.setObjectName("AppRoot"); self.setCentralWidget(root)
+        shell = QHBoxLayout(root); shell.setContentsMargins(0, 0, 0, 0); shell.setSpacing(0)
+        sidebar = QFrame(); sidebar.setObjectName("Sidebar"); sidebar.setFixedWidth(224)
+        side = QVBoxLayout(sidebar); side.setContentsMargins(18, 24, 18, 18); side.setSpacing(8)
+        mark = QLabel("YSP  ·  RADAR"); mark.setObjectName("BrandMark")
+        name = QLabel("校园数据雷达"); name.setObjectName("BrandName")
+        caption = QLabel("公开账号 · 本地分析"); caption.setObjectName("BrandCaption")
+        side.addWidget(mark); side.addWidget(name); side.addWidget(caption); side.addSpacing(22)
+        self.stack = QStackedWidget(); self.nav_group = QButtonGroup(self); self.nav_group.setExclusive(True)
+        labels = ["采集中心", "数据快照", "单次分析", "对比分析", "爆款监测", "采集设置"]
+        prefixes = ["●", "▦", "◒", "⌁", "◆", "⚙"]
+        for index, (prefix, label) in enumerate(zip(prefixes, labels)):
+            button = QPushButton(f"{prefix}   {label}"); button.setObjectName("NavButton")
+            button.setCheckable(True); button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda checked=False, i=index: self.set_page(i))
+            self.nav_group.addButton(button, index); side.addWidget(button)
+            if index == 0: button.setChecked(True)
+        side.addStretch()
+        status = QLabel("●  本地 SQLite · 在线采集"); status.setObjectName("SidebarCaption"); side.addWidget(status)
+        self.theme_button = QPushButton(); self.theme_button.setObjectName("ThemeButton")
+        self.theme_button.clicked.connect(self.toggle_theme); side.addWidget(self.theme_button)
+        shell.addWidget(sidebar); shell.addWidget(self.stack, 1)
 
-    # ── Single ────────────────────────────────────
-    def _build_single(self, p):
-        p.columnconfigure(0, weight=1); p.rowconfigure(2, weight=1)
-
-        bar = ttk.Frame(p); bar.grid(row=0, column=0, sticky="ew", pady=(8,5), padx=8)
-        ttk.Label(bar, text="Snapshot:").pack(side="left")
-        self.cb_s1 = ttk.Combobox(bar, state="readonly", width=25)
-        self.cb_s1.pack(side="left", padx=3)
-        ttk.Label(bar, text="TOP N:").pack(side="left", padx=(10,2))
-        self.sv_topn = tk.StringVar(value="15")
-        ttk.Spinbox(bar, textvariable=self.sv_topn, from_=5, to=100, width=4).pack(side="left")
-        ttk.Label(bar, text="Highlight:").pack(side="left", padx=(10,2))
-        self.sv_hl = tk.StringVar(value="武汉科技大学")
-        ttk.Entry(bar, textvariable=self.sv_hl, width=13).pack(side="left")
-        tk.Button(bar, text="Analyze", bg=CPRI, fg="white",
-            font=("",10,"bold"), padx=16, command=self._run_single).pack(side="left", padx=10)
-
-        self.txt_stats = tk.Text(p, height=6, font=("Consolas",10), state="disabled", wrap="word", bg="#fafafa")
-        self.txt_stats.grid(row=1, column=0, sticky="ew", padx=8, pady=(0,5))
-
-        self._chart_panel = ttk.LabelFrame(p, text="Charts", padding=8)
-        self._chart_panel.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0,8))
-        self._chart_panel.columnconfigure(0, weight=1)
-        # 初始提示
-        ttk.Label(self._chart_panel, text="Click [Analyze] to generate chart options.",
-                  foreground="#888").pack(pady=20)
-
-    # ── Compare ───────────────────────────────────
-    def _build_compare(self, p):
-        p.columnconfigure(0, weight=1); p.rowconfigure(4, weight=1)
-        bar = ttk.Frame(p); bar.grid(row=0, column=0, sticky="ew", pady=(8,5), padx=8)
-        ttk.Label(bar, text="A (base):").pack(side="left")
-        self.cb_a = ttk.Combobox(bar, state="readonly", width=25)
-        self.cb_a.pack(side="left", padx=3)
-        ttk.Label(bar, text="B (compare):").pack(side="left", padx=(15,3))
-        self.cb_b = ttk.Combobox(bar, state="readonly", width=25)
-        self.cb_b.pack(side="left", padx=3)
-        tk.Button(bar, text="Compare", bg=CRED, fg="white",
-            font=("",10,"bold"), padx=16, command=self._run_compare).pack(side="left", padx=10)
-
-        # 搜索栏 —— 自动补全
-        sbar = ttk.Frame(p); sbar.grid(row=1, column=0, sticky="ew", pady=(2,5), padx=8)
-        ttk.Label(sbar, text="Search School:").pack(side="left")
-        self.sv_cmp_search = tk.StringVar()
-        self.sv_cmp_search.trace_add("write", lambda *a: self._on_cmp_search())
-        self._cmp_entry = ttk.Entry(sbar, textvariable=self.sv_cmp_search, width=20)
-        self._cmp_entry.pack(side="left", padx=5)
-        tk.Button(sbar, text="Clear", padx=8, command=self._clear_cmp_search).pack(side="left")
-
-        # 搜索结果列表（最多5条，单击看详情，双击填输入框）
-        self._cmp_result_lb = tk.Listbox(p, height=0, font=("", 10),
-                                          selectmode="single", exportselection=False,
-                                          bg="#fffbe6", activestyle="none")
-        self._cmp_result_lb.grid(row=2, column=0, sticky="ew", padx=8)
-        self._cmp_result_lb.bind("<<ListboxSelect>>", self._on_cmp_select)
-        self._cmp_result_lb.bind("<Double-Button-1>", self._on_cmp_dblclick)
-        self._cmp_last_result = None
-        self._cmp_matches = []
-        self._p = p  # 保存父容器引用供趋势搜索使用
-
-        self.txt_compare = tk.Text(p, height=6, font=("Consolas",10), state="disabled", wrap="word", bg="#fafafa")
-        self.txt_compare.grid(row=3, column=0, sticky="ew", padx=8, pady=(0,5))
-
-        self._cmp_chart = ttk.Frame(p); self._cmp_chart.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0,8))
-        self._cmp_canvas = tk.Canvas(self._cmp_chart, bg=CWHT)
-        self._cmp_scroll = ttk.Scrollbar(self._cmp_chart, orient="vertical", command=self._cmp_canvas.yview)
-        self._cmp_inner = ttk.Frame(self._cmp_canvas)
-        self._cmp_inner.bind("<Configure>",
-            lambda e: self._cmp_canvas.configure(scrollregion=self._cmp_canvas.bbox("all")))
-        self._cmp_canvas.create_window((0,0), window=self._cmp_inner, anchor="nw")
-        self._cmp_canvas.configure(yscrollcommand=self._cmp_scroll.set)
-        self._cmp_canvas.pack(side="left", fill="both", expand=True)
-        self._cmp_scroll.pack(side="right", fill="y")
-
-    # ── 公共 ──────────────────────────────────────
-    def refresh_snapshots(self):
-        self._snapshots = get_all_snapshots()
-        items = [f"{s['name']} ({s['created_at'][:16]})" for s in self._snapshots]
-        for cb in [self.cb_s1, self.cb_a, self.cb_b]:
-            cb["values"] = items
-        if items:
-            self.cb_s1.current(0); self.cb_a.current(0)
-            if len(items)>=2: self.cb_b.current(len(items)-1)
-
-    def _get_snap(self, combo):
-        idx = combo.current()
-        if idx<0: return None,None
-        s = self._snapshots[idx]; return s, get_snapshot_data(s["id"])
-
-    def _clear(self, frm):
-        for w in frm.winfo_children(): w.destroy()
-
-    def _add_fig(self, fig, target):
-        c = FigureCanvasTkAgg(fig, target); c.draw()
-        c.get_tk_widget().pack(fill="x", pady=4)
-
-    # ── 单快照分析 ──────────────────────────────
-    def _run_single(self):
-        snap, data = self._get_snap(self.cb_s1)
-        if not data: return
-        df = to_dataframe(data); st = compute_stats(df)
-        top_n = int(self.sv_topn.get() or "15")
-        hl = self.sv_hl.get().strip() or None
-
-        # 统计摘要
-        self.txt_stats.config(state="normal"); self.txt_stats.delete("1.0","end")
-        ft,fu=auto_unit(st["fans"]["sum"]); pt,pu=auto_unit(st["plays"]["sum"])
-        wline = ""
-        if hl:
-            w = df[df["name"]==hl]
-            if len(w)>0:
-                w=w.iloc[0]; wf,wfu=auto_unit(w["fans_base"]); wp,wpu=auto_unit(w["play_base"])
-                rank = (df["fans_base"]>w["fans_base"]).sum()+1
-                wline = (f"\n*** {hl} ***  Rank #{rank}  |  "
-                         f"Fans: {wf:,.1f}{wfu}  |  Plays: {wp:,.1f}{wpu}  |  Videos: {int(w['video_cnt']):,}\n")
-        self.txt_stats.insert("end",
-            f"Accounts: {st['total']}\n{'='*60}{wline}{'='*60}\n"
-            f"Fans  Total: {ft:,.1f}{fu}   Mean: {st['fans']['mean']:,.0f}   "
-            f"Median: {st['fans']['median']:,.0f}   Max: {st['fans']['max']:,.0f}\n"
-            f"Plays Total: {pt:,.1f}{pu}   Mean: {st['plays']['mean']:,.0f}   "
-            f"Median: {st['plays']['median']:,.0f}   Max: {st['plays']['max']:,.0f}\n"
-            f"Videos Total: {st['videos']['sum']:,}   Mean: {st['videos']['mean']:,.1f}   "
-            f"Median: {st['videos']['median']:,.0f}   Max: {st['videos']['max']:,}")
-        self.txt_stats.config(state="disabled")
-
-        # 重建图表按钮面板
-        self._clear(self._chart_panel)
-        self._chart_vars.clear(); self._chart_cfgs.clear()
-
-        hl_val = None
-        if hl:
-            w = df[df["name"]==hl]
-            if len(w)>0: hl_val = w.iloc[0]["fans_base"]
-
-        # 每个图表一行：checkbox + 名称 + View按钮
-        charts = [
-            ("1","Fans TOP N Bar",        "bar",  dict(df=df, col="fans_base", n=top_n, title=f"Fans TOP {top_n}", hl=hl)),
-            ("2","Plays TOP N Bar",       "bar",  dict(df=df, col="play_base", n=top_n, title=f"Plays TOP {top_n}", hl=hl)),
-            ("3","Fans Distribution",     "hist", dict(df=df, col="fans_base", title="Fans Distribution", bins=20, hl=hl, hlv=hl_val)),
-            ("4","Fans vs Plays Scatter","scat",  dict(df=df, xc="fans_base", yc="play_base", xl="Fans", yl="Plays", title="Fans vs Plays", hl=hl)),
+        self.crawl_page = CrawlPage(); self.data_page = DataPage(); self.analysis_page = AnalysisPage()
+        self.compare_page = ComparePage(); self.burst_page = BurstMonitorPage(); self.settings_page = SettingsPage()
+        self.pages = [
+            self.crawl_page, self.data_page, self.analysis_page,
+            self.compare_page, self.burst_page, self.settings_page,
         ]
-        for key,label,ctype,cfg in charts:
-            rowf = ttk.Frame(self._chart_panel); rowf.pack(fill="x", pady=3)
-            var = tk.BooleanVar(value=True)
-            ttk.Checkbutton(rowf, variable=var).pack(side="left", padx=(5,8))
-            self._chart_vars[key]=var; self._chart_cfgs[key]=(ctype,cfg,label)
-            ttk.Label(rowf, text=label, font=("",10)).pack(side="left")
-            tk.Button(rowf, text="View", padx=14, command=lambda k=key: self._open_chart(k)).pack(side="right", padx=(0,5))
+        for page in self.pages: self.stack.addWidget(_scroll_page(page))
+        self.crawl_page.crawl_completed.connect(self._crawl_done)
+        self.data_page.snapshots_changed.connect(self.refresh_snapshot_pages)
+        self.settings_page.saved.connect(self.crawl_page.refresh)
+        self._update_theme_button()
 
-        sep = ttk.Separator(self._chart_panel, orient="horizontal"); sep.pack(fill="x", pady=8)
-        tk.Button(self._chart_panel, text="Open Dashboard (selected charts in grid)",
-            bg=CWR, fg="white", font=("",11,"bold"), padx=20, pady=6,
-            command=self._open_dashboard).pack(pady=4)
+    def set_page(self, index: int):
+        self.stack.setCurrentIndex(index)
+        button = self.nav_group.button(index)
+        if button: button.setChecked(True)
+        if index == 1: self.data_page.refresh_snapshots()
+        elif index == 2: self.analysis_page.refresh_snapshots()
+        elif index == 3: self.compare_page.refresh_snapshots()
+        elif index == 4: self.burst_page.refresh_snapshots()
 
-    def _open_chart(self, key):
-        info = self._chart_cfgs.get(key)
-        if not info: return
-        ctype, cfg, label = info
-        from .chart_windows import BarChartWindow, HistogramWindow, ScatterWindow
-        if ctype == "bar":
-            BarChartWindow(self, df=cfg["df"], col=cfg["col"], n=cfg["n"],
-                           title=cfg["title"], highlight_name=cfg["hl"])
-        elif ctype == "hist":
-            HistogramWindow(self, df=cfg["df"], col=cfg["col"], title=cfg["title"],
-                            bins=cfg["bins"], highlight_name=cfg["hl"],
-                            highlight_value=cfg["hlv"])
-        elif ctype == "scat":
-            ScatterWindow(self, df=cfg["df"], x=cfg["xc"], y=cfg["yc"],
-                          xl=cfg["xl"], yl=cfg["yl"], title=cfg["title"],
-                          highlight_name=cfg["hl"])
+    def _crawl_done(self, snapshot_id: int):
+        self.refresh_snapshot_pages(); self.data_page.refresh_snapshots(snapshot_id); self.set_page(1)
 
-    def _open_dashboard(self):
-        selected = []
-        for key, var in self._chart_vars.items():
-            if var.get():
-                ctype, cfg, label = self._chart_cfgs[key]
-                dc = {"type": ctype if ctype!="scat" else "scatter", "title": label}
-                if ctype=="bar": dc.update(col=cfg["col"], n=cfg["n"])
-                elif ctype=="hist": dc.update(col=cfg["col"], bins=cfg["bins"])
-                else: dc.update(x=cfg["xc"], y=cfg["yc"], xl=cfg["xl"], yl=cfg["yl"])
-                selected.append(dc)
-        if not selected: messagebox.showwarning("Dashboard","Please select at least one chart."); return
-        df = self._chart_cfgs.get("1",(None,{},None))[1].get("df")
-        if df is None: return
-        hl = self.sv_hl.get().strip() or None
-        from .chart_windows import DashboardWindow
-        DashboardWindow(self, df, selected, highlight_name=hl)
+    def refresh_snapshot_pages(self):
+        self.analysis_page.refresh_snapshots(); self.compare_page.refresh_snapshots(); self.burst_page.refresh_snapshots()
 
-    # ── 双快照对比 ──────────────────────────────
-    def _run_compare(self):
-        snap_a, data_a = self._get_snap(self.cb_a)
-        snap_b, data_b = self._get_snap(self.cb_b)
-        if not data_a or not data_b: return
-        if snap_a["id"]==snap_b["id"]: messagebox.showwarning("Warning","Select two different snapshots"); return
+    def toggle_theme(self):
+        self.is_dark = not self.is_dark; set_setting("theme", "dark" if self.is_dark else "light")
+        apply_theme(QApplication.instance(), self.is_dark); self._update_theme_button()
+        self.crawl_page.theme_changed(); self.analysis_page.theme_changed()
+        self.compare_page.theme_changed(); self.burst_page.theme_changed()
 
-        # 自动判断时间顺序：A 必须是较早的快照
-        swapped = False
-        if snap_a.get("created_at") and snap_b.get("created_at"):
-            if snap_a["created_at"] > snap_b["created_at"]:
-                snap_a, snap_b = snap_b, snap_a
-                data_a, data_b = data_b, data_a
-                swapped = True
+    def _update_theme_button(self):
+        self.theme_button.setText("☀  切换浅色" if self.is_dark else "◐  切换深色")
 
-        na,nb = snap_a["name"],snap_b["name"]
-        r = compare_snapshots(data_a, data_b, na, nb); s=r["summary"]
-        hl = self.sv_hl.get().strip() or None
+    def closeEvent(self, event):
+        if self.crawl_page.is_running():
+            answer = QMessageBox.question(self, "采集仍在运行", "停止当前采集并退出？")
+            if answer != QMessageBox.StandardButton.Yes: event.ignore(); return
+            self.crawl_page.stop(); self.crawl_page._thread.wait(2500)
+        event.accept()
 
-        # 计算时间跨度
-        time_span_days = 0
-        if snap_a.get("created_at") and snap_b.get("created_at"):
-            try:
-                ta = datetime.fromisoformat(snap_a["created_at"])
-                tb = datetime.fromisoformat(snap_b["created_at"])
-                time_span_days = (tb - ta).days
-            except Exception:
-                pass
-
-        self.txt_compare.config(state="normal"); self.txt_compare.delete("1.0","end")
-        swap_note = "*** Auto-swapped: A was newer than B, reversed for correct comparison ***\n" if swapped else ""
-        precision_note = ("*** Precision: ±500 per measurement (万-unit). "
-                         "Bars in lighter shade = change within rounding error.\n")
-        self.txt_compare.insert("end",
-            f"Compare: [{na}] vs [{nb}]  |  Time span: {time_span_days} days\n{'='*60}\n"
-            f"{swap_note}{precision_note}"
-            f"Fans:  {s[f'fans_{na}']:,.0f} -> {s[f'fans_{nb}']:,.0f}  (chg: {s['fans_chg']:+,.0f})\n"
-            f"Plays: {s[f'play_{na}']:,.0f} -> {s[f'play_{nb}']:,.0f}  (chg: {s['play_chg']:+,.0f})\n"
-            f"Videos:{s[f'video_{na}']:,} -> {s[f'video_{nb}']:,}  (chg: {s['video_chg']:+,})\n"
-            f"Accts: {s['acct_chg']:+d}  (new: {len(r['new'])}, gone: {len(r['gone'])})")
-        self.txt_compare.config(state="disabled")
-
-        # 缓存结果，供搜索使用
-        self._cmp_last_result = r
-        self._cmp_last_snap_a = snap_a
-        self._cmp_last_snap_b = snap_b
-        self._cmp_last_hl = hl
-        self._clear_cmp_search()
-
-        self._clear(self._cmp_inner)
-
-        # 储存 all 数据供趋势分析使用
-        self._cmp_all = r.get("all", [])
-
-        # 1. 粉丝增长 TOP 10
-        if r["fans_growth"]:
-            self._add_growth_chart(r["fans_growth"], "fans_chg", "Fans Growth TOP 10",
-                                    CPUR, hl, time_span_days)
-
-        # 2. 播放量增长 TOP 10
-        if r["play_growth"]:
-            self._add_growth_chart(r["play_growth"], "play_chg", "Plays Growth TOP 10",
-                                    CGRN, hl, time_span_days)
-
-        # 3. 视频增长 TOP 10
-        if r["video_growth"]:
-            self._add_growth_chart(r["video_growth"], "video_chg", "Video Growth TOP 10",
-                                    CPRI, hl, time_span_days)
-
-        # 4. 播放增长/新发视频 TOP 10 (仅当 video_chg>0 时有效)
-        if r["ppv_growth"]:
-            self._add_growth_chart(r["ppv_growth"], "play_per_video", "Play/Video Ratio TOP 10",
-                                    CWR, hl, time_span_days, fmt=",.1f")
-
-        # 趋势分析按钮（始终显示）
-        self._add_trend_button(time_span_days)
-
-    def _add_growth_chart(self, data, col, title, color, hl, time_span=0, fmt=",.0f"):
-        """通用增长柱状图。time_span 预留，当前仅用于颜色区分。"""
-        gd = sorted(data[:10], key=lambda x: x[col] or 0)
-        fig, ax = plt.subplots(figsize=(10, 5))
-        setup_font(); cjk = get_cjk_font()
-        names = [d["name"] for d in gd]
-        vals = [d[col] if d[col] is not None else 0 for d in gd]
-        colors = [color if v >= 0 else "#999999" for v in vals]
-        if hl:
-            colors = [CRED if n == hl else c for n, c in zip(names, colors)]
-        ax.barh(range(len(names)), vals, color=colors)
-        ax.set_yticks(range(len(names)))
-        ax.set_yticklabels(names, fontsize=9, fontproperties=cjk)
-        ax.set_title(title, fontsize=14, fontweight="bold", fontproperties=cjk)
-        ax.axvline(0, color="black", linewidth=0.5)
-        # 在柱子上显示数值
-        for i, v in enumerate(vals):
-            xpos = max(v, 0) + max(vals)*0.01 if v >= 0 else v - max(abs(vv) for vv in vals)*0.01
-            ha = "left" if v >= 0 else "right"
-            ax.text(xpos, i, f" {v:{fmt}}", va="center", ha=ha, fontsize=8,
-                    fontproperties=cjk)
-        fig.tight_layout(); self._add_fig(fig, self._cmp_inner)
-
-    def _add_trend_button(self, time_span_days):
-        """图表底部：趋势分析搜索栏 + 自动补全"""
-        frm = ttk.Frame(self._cmp_inner)
-        frm.pack(fill="x", pady=10)
-        ttk.Label(frm, text="Trend School:").pack(side="left")
-        self.sv_trend_school = tk.StringVar(value=self._cmp_last_hl or "")
-        self.sv_trend_school.trace_add("write", lambda *a: self._on_trend_filter())
-        self._trend_entry = ttk.Entry(frm, textvariable=self.sv_trend_school, width=18)
-        self._trend_entry.pack(side="left", padx=5)
-        warn = "" if time_span_days >= 30 else f" (only {time_span_days}d)"
-        tk.Button(frm, text=f"Open Trend{warn}",
-                  bg=CPUR, fg="white", font=("", 10), padx=14, pady=4,
-                  command=self._open_trend).pack(side="left", padx=5)
-
-        # 趋势搜索自动补全列表
-        self._trend_lb = tk.Listbox(self._cmp_inner, height=0, font=("", 10),
-                                     selectmode="single", exportselection=False,
-                                     bg="#fffbe6", activestyle="none")
-        self._trend_lb.pack(fill="x", pady=(0, 4))
-        self._trend_lb.bind("<Double-Button-1>", self._on_trend_dblclick)
-        self._trend_matches = []
-
-    def _on_trend_filter(self):
-        """趋势搜索自动补全"""
-        self._trend_lb.delete(0, "end")
-        self._trend_matches = []
-        # 从对比结果中获取所有校名
-        r = self._cmp_last_result
-        if not r:
-            self._trend_lb.configure(height=0)
-            return
-        txt = self.sv_trend_school.get().strip()
-        if not txt:
-            self._trend_lb.configure(height=0)
-            return
-        for d in r.get("all", []):
-            if txt.lower() in d.get("name", "").lower():
-                self._trend_matches.append(d)
-                if len(self._trend_matches) >= 5:
-                    break
-        if self._trend_matches:
-            for d in self._trend_matches:
-                self._trend_lb.insert("end", d["name"])
-            self._trend_lb.configure(height=len(self._trend_matches))
-        else:
-            self._trend_lb.configure(height=0)
-
-    def _on_trend_dblclick(self, event):
-        """双击趋势补全列表：填入输入框"""
-        sel = self._trend_lb.curselection()
-        if not sel or not self._trend_matches:
-            return
-        name = self._trend_matches[sel[0]]["name"]
-        self.sv_trend_school.set(name)
-        self._trend_lb.configure(height=0)
-        self._trend_matches = []
-
-    def _open_trend(self):
-        """打开趋势分析窗口：从搜索框获取高校名，拉所有快照数据做 Theil-Sen 回归"""
-        target_name = self.sv_trend_school.get().strip()
-        if not target_name:
-            messagebox.showinfo("Trend Analysis", "Enter a school name above.")
-            return
-
-        # 从所有快照获取该高校的时间序列数据
-        from ..models.database import get_all_snapshots, get_snapshot_data
-        all_snaps = get_all_snapshots()
-        if len(all_snaps) < 2:
-            messagebox.showwarning("Trend Analysis", "Need at least 2 snapshots for trend analysis.")
-            return
-
-        timestamps = []
-        fans_vals = []
-        snap_labels = []
-        for snap in sorted(all_snaps, key=lambda s: s["created_at"]):
-            data = get_snapshot_data(snap["id"])
-            for d in data:
-                if d["name"] == target_name:
-                    try:
-                        ts = datetime.fromisoformat(snap["created_at"]).timestamp()
-                    except Exception:
-                        ts = 0
-                    timestamps.append(ts)
-                    fans_vals.append(d["fans_base"] or 0)
-                    snap_labels.append(snap["name"])
-                    break
-
-        if len(timestamps) < 2:
-            messagebox.showwarning("Trend Analysis",
-                f"'{target_name}' only appears in {len(timestamps)} snapshot(s). Need 2+.")
-            return
-
-        # 计算时间跨度
-        td = (max(timestamps) - min(timestamps)) / 86400.0  # seconds -> days
-
-        # 时间跨度太短时警告
-        if td < 30:
-            ok = messagebox.askyesno("Trend Analysis",
-                f"Only {td:.0f} days of data ({len(timestamps)} snapshots).\n"
-                f"Short time spans make trend estimates unreliable (±500 quantization error dominates).\n\n"
-                f"Continue anyway?")
-            if not ok:
-                return
-
-        robust_slope, ols_slope, intercept = theil_sen_slope(timestamps, fans_vals)
-        spikes = detect_spikes(timestamps, fans_vals, robust_slope, intercept)
-
-        from .chart_windows import TrendWindow
-        TrendWindow(self, target_name, timestamps, fans_vals, snap_labels,
-                    robust_slope, ols_slope, intercept, spikes, td)
-
-    def _on_cmp_search(self):
-        """自动补全：每次输入触发，更新下拉列表"""
-        r = self._cmp_last_result
-        self._cmp_result_lb.delete(0, "end")
-        self._cmp_matches = []
-        if not r:
-            self._cmp_result_lb.configure(height=0)
-            return
-        txt = self.sv_cmp_search.get().strip()
-        if not txt:
-            self._cmp_result_lb.configure(height=0)
-            return
-        # 模糊匹配，最多5条
-        for d in r.get("all", []):
-            if txt.lower() in d.get("name", "").lower():
-                self._cmp_matches.append(d)
-                if len(self._cmp_matches) >= 5:
-                    break
-        if self._cmp_matches:
-            for d in self._cmp_matches:
-                self._cmp_result_lb.insert("end", d["name"])
-            self._cmp_result_lb.configure(height=len(self._cmp_matches))
-        else:
-            self._cmp_result_lb.configure(height=0)
-        # 更新趋势搜索的候选列表
-        self._on_trend_filter()
-
-    def _on_cmp_dblclick(self, event):
-        """双击列表项：填入输入框"""
-        sel = self._cmp_result_lb.curselection()
-        if not sel or not self._cmp_matches:
-            return
-        name = self._cmp_matches[sel[0]]["name"]
-        self.sv_cmp_search.set(name)
-        self._cmp_result_lb.configure(height=0)
-        self._cmp_matches = []
-
-    def _on_cmp_select(self, event):
-        """点击搜索结果：在摘要区显示该校详细对比（含误差区间）"""
-        sel = self._cmp_result_lb.curselection()
-        if not sel or not self._cmp_matches:
-            return
-        d = self._cmp_matches[sel[0]]
-        # 高亮选中项
-        for i in range(self._cmp_result_lb.size()):
-            self._cmp_result_lb.itemconfig(i, bg="#fffbe6")
-        self._cmp_result_lb.itemconfig(sel[0], bg="#b3d9ff")
-
-        self.txt_compare.config(state="normal")
-        text = self.txt_compare.get("1.0", "end-1c")
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.startswith("*** Search:")]
-        text = "\n".join(lines)
-
-        # 获取单位信息用于区间计算
-        ua_fans = d.get(f"fans_unit_A", d.get("fans_unit", "个"))
-        ub_fans = d.get(f"fans_unit_B", d.get("fans_unit", "个"))
-        ua_play = d.get(f"play_unit_A", d.get("play_unit", "个"))
-        ub_play = d.get(f"play_unit_B", d.get("play_unit", "个"))
-
-        fchg = d.get("fans_chg", 0) or 0
-        pchg = d.get("play_chg", 0) or 0
-        vchg = d.get("video_chg", 0) or 0
-        ppv = d.get("play_per_video", None)
-        ppv_str = f"{ppv:,.1f}" if ppv is not None and ppv == ppv else "N/A"
-
-        # 计算粉丝和播放量变化区间
-        _, flo, fhi, fconf = change_interval(
-            d.get("fans_A", 0), ua_fans, d.get("fans_B", 0), ub_fans)
-        _, plo, phi, pconf = change_interval(
-            d.get("play_A", 0), ua_play, d.get("play_B", 0), ub_play)
-        fflag = " [confirmed]" if fconf == "confirmed" else " [uncertain ±500]"
-        pflag = " [confirmed]" if pconf == "confirmed" else " [uncertain ±500]"
-
-        search_line = (f"*** Search: {d['name']} ***\n"
-                      f"  Fans chg: {fchg:+,.0f}  ({flo:+,.0f} ~ {fhi:+,.0f}){fflag}\n"
-                      f"  Plays chg: {pchg:+,.0f}  ({plo:+,.0f} ~ {phi:+,.0f}){pflag}\n"
-                      f"  Videos chg: {vchg:+,.0f}  |  Play/Video: {ppv_str}")
-        self.txt_compare.delete("1.0", "end")
-        self.txt_compare.insert("end", text + "\n" + search_line)
-        self.txt_compare.config(state="disabled")
-
-    def _clear_cmp_search(self):
-        """清除搜索"""
-        self.sv_cmp_search.set("")
-        self._cmp_result_lb.delete(0, "end")
-        self._cmp_result_lb.configure(height=0)
-        self._cmp_matches = []
-        if self._cmp_last_result:
-            self.txt_compare.config(state="normal")
-            text = self.txt_compare.get("1.0", "end-1c")
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.startswith("*** Search:")]
-            self.txt_compare.delete("1.0", "end")
-            self.txt_compare.insert("end", "\n".join(lines))
-            self.txt_compare.config(state="disabled")
-
-# ═══════════════════════════════════════════════════════
-#  Settings Dialog
-# ═══════════════════════════════════════════════════════
-class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent):
-        super().__init__(parent); self.title("Settings")
-        self.resizable(False,False); self.transient(parent)
-        self._build(); self._load()
-
-    def _build(self):
-        f=ttk.Frame(self,padding=20); f.pack(fill="both")
-        r=[0]
-        def a(l,v,w=10):
-            ttk.Label(f,text=l).grid(row=r[0],column=0,sticky="w",pady=3)
-            ttk.Entry(f,textvariable=v,width=w).grid(row=r[0],column=1,sticky="ew",pady=3,padx=(15,0))
-            r[0]+=1
-        self.sv_int=tk.StringVar(); a("Request Interval (s):",self.sv_int)
-        self.sv_con=tk.StringVar(); a("Concurrency:",self.sv_con)
-        self.sv_to=tk.StringVar(); a("Timeout (s):",self.sv_to)
-        self.sv_ret=tk.StringVar(); a("Max Retries:",self.sv_ret)
-        self.sv_day=tk.StringVar(); a("Rate Window (days):",self.sv_day)
-        self.sv_cnt=tk.StringVar(); a("Max Crawls/Window:",self.sv_cnt)
-        ttk.Separator(f,orient="horizontal").grid(row=r[0],column=0,columnspan=2,sticky="ew",pady=15)
-        r[0]+=1
-        b=ttk.Frame(f); b.grid(row=r[0],column=0,columnspan=2)
-        tk.Button(b,text="Save",bg=CPRI,fg="white",padx=20,command=self._save).pack(side="left",padx=5)
-        tk.Button(b,text="Cancel",padx=20,command=self.destroy).pack(side="left",padx=5)
-
-    def _load(self):
-        for v,k in [(self.sv_int,"request_interval","3"),(self.sv_con,"max_concurrency","3"),
-                     (self.sv_to,"timeout_seconds","30"),(self.sv_ret,"max_retries","3"),
-                     (self.sv_day,"rate_limit_days","7"),(self.sv_cnt,"rate_limit_count","2")]:
-            v.set(get_setting(k,default))
-
-    def _save(self):
-        for v,k in [(self.sv_int,"request_interval"),(self.sv_con,"max_concurrency"),
-                     (self.sv_to,"timeout_seconds"),(self.sv_ret,"max_retries"),
-                     (self.sv_day,"rate_limit_days"),(self.sv_cnt,"rate_limit_count")]:
-            set_setting(k,v.get())
-        messagebox.showinfo("OK","Settings saved."); self.destroy()
-
-# ═══════════════════════════════════════════════════════
-#  Snapshot Manager
-# ═══════════════════════════════════════════════════════
-class SnapshotManager(tk.Toplevel):
-    def __init__(self, parent, on_change=None):
-        super().__init__(parent); self.title("Snapshot Manager")
-        self.geometry("500x420"); self.transient(parent)
-        self._cb=on_change; self._build(); self._refresh()
-
-    def _build(self):
-        f=ttk.Frame(self,padding=15); f.pack(fill="both",expand=True)
-        f.columnconfigure(0,weight=1); f.rowconfigure(1,weight=1)
-        ttk.Label(f,text="Manage snapshots. Delete cannot be undone.",foreground="#888").grid(row=0,column=0,sticky="w")
-        self.lb=tk.Listbox(f,font=("",10)); self.lb.grid(row=1,column=0,sticky="nsew",pady=(5,5))
-        self.lb.bind("<<ListboxSelect>>",self._sel)
-        self.lbl=ttk.Label(f,text="",font=("",9),foreground="#555",background="#f0f0f0",padding=8,anchor="w")
-        self.lbl.grid(row=2,column=0,sticky="ew",pady=(0,5))
-        b=ttk.Frame(f); b.grid(row=3,column=0)
-        tk.Button(b,text="Rename",padx=12,command=self._rename).pack(side="left",padx=3)
-        tk.Button(b,text="Delete",fg=CRED,padx=12,command=self._delete).pack(side="left",padx=3)
-        tk.Button(b,text="Close",padx=12,command=self.destroy).pack(side="right",padx=3)
-
-    def _refresh(self):
-        self.lb.delete(0,"end"); self._snaps=get_all_snapshots()
-        for s in self._snaps:
-            self.lb.insert("end",f"{s['name']}  |  {s['created_at'][:19]}  |  {s['success_count']}/{s['total_count']}")
-        if self._snaps: self.lb.selection_set(0); self._sel()
-
-    def _sel(self,event=None):
-        sel=self.lb.curselection()
-        if not sel: return
-        s=self._snaps[sel[0]]; data=get_snapshot_data(s["id"])
-        top5=sorted(data,key=lambda x:x.get("fans_base",0) or 0,reverse=True)[:5]
-        names=" > ".join([d["name"] for d in top5])
-        self.lbl.config(text=f"Name: {s['name']}  |  Created: {s['created_at'][:19]}\n"
-            f"Total: {s['total_count']}  |  OK: {s['success_count']}  |  Fail: {s['fail_count']}\n"
-            f"Notes: {s.get('notes','-')}\nTOP5: {names}")
-
-    def _rename(self):
-        sel=self.lb.curselection()
-        if not sel: return
-        s=self._snaps[sel[0]]
-        from tkinter import simpledialog
-        n=simpledialog.askstring("Rename","New name:",initialvalue=s["name"],parent=self)
-        if n:
-            from ..models.database import _connect
-            c=_connect(); c.execute("UPDATE snapshots SET name=? WHERE id=?",(n,s["id"]))
-            c.commit(); c.close()
-            self._refresh()
-            if self._cb: self._cb()
-
-    def _delete(self):
-        sel=self.lb.curselection()
-        if not sel: return
-        s=self._snaps[sel[0]]
-        if messagebox.askyesno("Confirm",f"Delete '{s['name']}'?\n{s['total_count']} records lost."):
-            delete_snapshot(s["id"]); self._refresh()
-            if self._cb: self._cb()
-
-# ═══════════════════════════════════════════════════════
-#  Main Window
-# ═══════════════════════════════════════════════════════
-class MainWindow:
-    def __init__(self):
-        self.root=tk.Tk(); self.root.title("YSPlatform Analyzer")
-        self.root.geometry("1150x780"); self.root.minsize(950,650)
-        self.root.configure(bg=CBG)
-        init_db()
-        self._build_menu(); self._build_notebook()
-        self.root.after(200,self._initial_refresh)
-
-    def _build_menu(self):
-        mb=tk.Menu(self.root); self.root.config(menu=mb)
-        fm=tk.Menu(mb,tearoff=0)
-        fm.add_command(label="Export CSV",command=lambda:self.data_tab._export())
-        fm.add_separator(); fm.add_command(label="Exit",command=self.root.destroy)
-        mb.add_cascade(label="File",menu=fm)
-        tm=tk.Menu(mb,tearoff=0)
-        tm.add_command(label="Snapshot Manager",command=self._open_sm)
-        tm.add_command(label="Settings",command=self._open_settings)
-        mb.add_cascade(label="Tools",menu=tm)
-
-    def _build_notebook(self):
-        self.nb=ttk.Notebook(self.root); self.nb.pack(fill="both",expand=True,padx=4,pady=4)
-        self.crawl_tab=CrawlTab(self.nb,self)
-        self.data_tab=DataTableTab(self.nb,self)
-        self.analysis_tab=AnalysisTab(self.nb,self)
-        self.nb.add(self.crawl_tab,text=" Crawl ")
-        self.nb.add(self.data_tab,text=" Data Table ")
-        self.nb.add(self.analysis_tab,text=" Analysis ")
-        self.nb.bind("<<NotebookTabChanged>>",self._on_tab)
-
-    def _initial_refresh(self):
-        self.crawl_tab.refresh(); self.data_tab.refresh_snapshots(); self.analysis_tab.refresh_snapshots()
-
-    def _on_tab(self,event):
-        i=self.nb.index("current")
-        if i==0: self.crawl_tab.refresh()
-        elif i==1: self.data_tab.refresh_snapshots()
-        elif i==2: self.analysis_tab.refresh_snapshots()
-
-    def on_crawl_done(self,sid):
-        self.data_tab.refresh_snapshots(); self.analysis_tab.refresh_snapshots(); self.nb.select(1)
-
-    def _open_sm(self):
-        SnapshotManager(self.root,on_change=lambda:(self.data_tab.refresh_snapshots(),self.analysis_tab.refresh_snapshots()))
-
-    def _open_settings(self): SettingsDialog(self.root)
-
-    def run(self): self.root.mainloop()
+    def run(self) -> int:
+        self.show()
+        return QApplication.instance().exec()

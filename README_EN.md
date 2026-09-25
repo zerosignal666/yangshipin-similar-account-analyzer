@@ -2,26 +2,24 @@
 
 # Yangshipin Similar Account Analyzer
 
-A desktop application that crawls public university account data from the Yangshipin (央视频 / yspapp.cn) platform, with built-in data visualization and snapshot comparison.
+A modern desktop application that crawls public university account data from Yangshipin (央视频 / yspapp.cn), with visualization, snapshot comparison, and all-school breakout monitoring. The PySide6 interface defaults to light mode and includes a dark-mode toggle.
 
 ## Features
 
 - **Batch Crawl** — Crawl follower count, play count, and video count from 100+ university accounts. Start / Pause / Resume / Stop with live progress.
 - **Data Table** — Sortable, searchable table with unit switching (raw / 万 / 亿). Highlight any university (e.g. your own) in red.
-- **Charts** — Interactive bar charts, histograms, and scatter plots with hover tooltips and scroll zoom.
+- **Charts** — Ranking and comparison bars use compact axes, hover highlighting, and exact-value tooltips; histograms and scatter plots support zoom and point labels.
 - **Dashboard** — Responsive multi-chart grid that adapts to window size.
 - **Snapshot System** — Each crawl saves a timestamped snapshot. Compare any two snapshots to see growth. Auto-swaps snapshots by time to ensure correct comparison direction.
 - **Snapshot Compare** — 4 growth ranking charts with quantization error intervals (confirmed / uncertain ±500). Autocomplete search: click to view detail, double-click to fill.
-- **Trend Analysis** — Theil-Sen robust regression eliminates outlier influence. OLS comparison shows nominal trend vs robust trend. Auto-detects likely viral spikes.
+- **All-school Pulse Watch** — Scan every university in a selected snapshot range and rank play growth, video growth, plays gained per new video, and robust anomaly signals. A plain-language sensitivity control uses a fixed multiplier unit, gaps are excluded from breakout decisions, and each school can be opened for interval-level evidence.
 - **Rate Limiting** — Configurable crawl frequency control to be respectful to the server.
-
-## Screenshots
-
-*Coming soon*
+- **Safer Settings** — Collection parameters use large minus/plus controls, a numeric-only field, and a fixed unit label.
 
 ## Requirements
 
-- Windows 10/11 64-bit (macOS support planned)
+- Windows 10/11 64-bit
+- The code path is macOS-compatible; a signed Mac package still requires validation on real Mac hardware
 - No Python installation needed if using the pre-built EXE
 
 ## Quick Start
@@ -63,11 +61,16 @@ ysp-analyzer/
 │   │   └── database.py      # SQLite CRUD operations
 │   ├── analysis/
 │   │   ├── charts.py        # Matplotlib chart functions + CJK fonts
-│   │   └── stats.py         # Statistics + Theil-Sen regression + intervals
+│   │   ├── stats.py         # Statistics + change intervals
+│   │   └── burst.py         # School content pulses + robust threshold
 │   └── ui/
-│       ├── main_window.py   # Tkinter main window (3-tab layout)
-│       ├── chart_windows.py # Interactive charts + Trend analysis window
-│       └── workers.py       # Background thread for crawl operations
+│       ├── main_window.py   # PySide6 main window (6 sidebar workspaces)
+│       ├── burst_page.py    # All-school pulse ranking and filtering
+│       ├── theme.py         # Light/dark themes + cross-platform fonts
+│       ├── widgets.py       # Shared cards, headers, and metric widgets
+│       ├── chart_windows.py # Shared QtAgg interactive charts
+│       ├── burst_window.py  # Content Pulse window
+│       └── workers.py       # QThread crawl worker
 └── data/                    # SQLite database (auto-created, gitignored)
 ```
 
@@ -85,8 +88,8 @@ One account per line. The app reads this file on startup.
 
 | Layer | Library |
 |---|---|
-| GUI | Tkinter (built-in) |
-| Charts | Matplotlib (TkAgg backend) |
+| GUI | PySide6 (Qt 6) |
+| Charts | Matplotlib (QtAgg backend) |
 | Data | Pandas + NumPy |
 | HTTP | httpx |
 | Parser | BeautifulSoup4 + lxml |

@@ -35,8 +35,16 @@ def top_n(df: pd.DataFrame, col: str = "fans_base", n: int = 10) -> pd.DataFrame
 
 
 def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dict:
-    df_a = to_dataframe(data_a).set_index("cp_id")
-    df_b = to_dataframe(data_b).set_index("cp_id")
+    columns = ["cp_id", "name", "fans_base", "play_base", "video_cnt", "fans_unit", "play_unit"]
+    df_a = to_dataframe(data_a)
+    df_b = to_dataframe(data_b)
+    if df_a.empty: df_a = pd.DataFrame(columns=columns)
+    if df_b.empty: df_b = pd.DataFrame(columns=columns)
+    for frame in (df_a, df_b):
+        for column in ("fans_base", "play_base", "video_cnt"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    df_a = df_a.set_index("cp_id")
+    df_b = df_b.set_index("cp_id")
     if df_a.empty and df_b.empty: return {}
 
     cmp = pd.DataFrame(index=df_b.index.union(df_a.index))
@@ -85,7 +93,7 @@ def compare_snapshots(data_a: list, data_b: list, name_a="A", name_b="B") -> dic
 
 # ── 量化误差与趋势分析 ──────────────────────────
 
-QUANTIZATION_HALF = {"万": 500, "亿": 5000, "个": 0, "": 0}
+QUANTIZATION_HALF = {"万": 500, "亿": 5_000_000, "个": 0, "": 0}
 
 
 def _quant_half(unit):
@@ -132,8 +140,9 @@ def theil_sen_slope(timestamps, values):
     robust_slope = np.median(slopes)
     # OLS slope for comparison
     A = np.vstack([ts, np.ones(n)]).T
-    ols_slope, intercept = np.linalg.lstsq(A, vs, rcond=None)[0]
-    return robust_slope, ols_slope, intercept
+    ols_slope, _ = np.linalg.lstsq(A, vs, rcond=None)[0]
+    robust_intercept = np.median(vs - robust_slope * ts)
+    return float(robust_slope), float(ols_slope), float(robust_intercept)
 
 
 def detect_spikes(timestamps, values, robust_slope, intercept=None):
